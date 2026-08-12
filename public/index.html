@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Strategy Terminal</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📈</text></svg>">
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <div class="brand">STRATEGY<em>·</em>TERMINAL</div>
+    <span class="pill" id="connPill"><span class="dot" id="connDot"></span><span id="connText">checking…</span></span>
+    <span class="pill" id="clockPill" hidden><span class="dot" id="clockDot"></span><span id="clockText"></span></span>
+    <span class="pill" id="acctPill" hidden></span>
+    <div class="spacer"></div>
+    <span class="pill" id="langPill" title="Detected runtimes"></span>
+    <button class="ghost" id="btnKeys">API Keys</button>
+  </header>
+
+  <div class="runbar">
+    <label class="field"><span>Symbol</span><input id="symbol" value="AAPL" spellcheck="false"></label>
+    <label class="field"><span>Timeframe</span>
+      <select id="timeframe">
+        <option>1Min</option><option>5Min</option><option>15Min</option><option>30Min</option>
+        <option>1Hour</option><option selected>1Day</option><option>1Week</option>
+      </select>
+    </label>
+    <label class="field"><span>Start</span><input type="date" id="start"></label>
+    <label class="field"><span>End</span><input type="date" id="end"></label>
+    <label class="field"><span>Language</span><select id="language"></select></label>
+    <button id="btnSettings" class="ghost" title="Cash, fills, costs">⚙ Settings</button>
+    <div class="spacer"></div>
+    <button class="primary" id="btnRun">▶ Run Backtest</button>
+    <button id="btnLive" title="Forward-test on live bars with simulated fills">◉ Go Live</button>
+  </div>
+
+  <main>
+    <section class="pane-left">
+      <div class="panel-head">
+        <h2>Strategy</h2>
+        <span class="hint" id="entryHint"></span>
+        <div class="spacer"></div>
+        <button class="ghost" id="btnTemplate" title="Load a starter strategy in the selected language">Template</button>
+        <button class="ghost" id="btnApiRef">API</button>
+        <button class="ghost" id="btnSave">Save</button>
+        <button class="ghost" id="btnLoad">Open</button>
+      </div>
+      <div class="editor-wrap">
+        <div class="gutter" id="gutter">1</div>
+        <textarea id="code" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off"></textarea>
+      </div>
+      <div class="editor-foot">
+        <label class="field" style="flex:1"><span>Params (JSON — read with ctx.param)</span>
+          <input id="params" value='{"fast": 10, "slow": 30}' spellcheck="false">
+        </label>
+        <span class="hint">⌘↵ run</span>
+      </div>
+    </section>
+
+    <section class="pane-right">
+      <div class="tabs">
+        <button class="tab active" data-tab="results">Results</button>
+        <button class="tab" data-tab="trades">Trades <span class="badge" id="tradeCount"></span></button>
+        <button class="tab" data-tab="console">Console <span class="badge" id="logCount"></span></button>
+        <button class="tab" data-tab="live">Live <span class="badge" id="liveBadge"></span></button>
+      </div>
+      <div class="tabpanes">
+        <div class="tabpane active" id="pane-results">
+          <div id="resultsBody"><div class="empty">Paste a strategy, pick a language, hit <b>Run Backtest</b>.</div></div>
+        </div>
+        <div class="tabpane" id="pane-trades"><div class="empty">No trades yet.</div></div>
+        <div class="tabpane" id="pane-console"><div class="empty">No output yet.</div></div>
+        <div class="tabpane" id="pane-live"><div class="empty">Not running. <b>Go Live</b> streams fresh bars from Alpaca and runs your strategy forward with simulated fills — no orders are ever sent.</div></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="tooltip" id="tip"></div>
+
+<!-- API keys -->
+<div class="modal-back" id="keysModal">
+  <div class="modal">
+    <h2>Alpaca API keys</h2>
+    <p>Stored in <code>.credentials.json</code> next to the server (chmod 600), never sent anywhere but Alpaca. Generate keys at <a href="https://app.alpaca.markets/paper/dashboard/overview" target="_blank" rel="noreferrer">app.alpaca.markets</a>.</p>
+    <label class="field"><span>API Key ID</span><input id="keyId" spellcheck="false" placeholder="PK…"></label>
+    <label class="field"><span>Secret Key</span><input id="secretKey" type="password" spellcheck="false"></label>
+    <div class="settings-grid">
+      <label class="field"><span>Account</span><select id="paperMode"><option value="paper" selected>Paper</option><option value="live">Live</option></select></label>
+      <label class="field"><span>Data feed</span><select id="feed"><option value="iex" selected>IEX (free)</option><option value="sip">SIP (paid)</option></select></label>
+    </div>
+    <div id="keysMsg"></div>
+    <div class="row">
+      <button class="primary" id="btnConnect">Connect</button>
+      <button id="btnDisconnect" class="danger">Forget keys</button>
+      <div class="spacer"></div>
+      <button id="btnKeysClose" class="ghost">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings -->
+<div class="modal-back" id="settingsModal">
+  <div class="modal">
+    <h2>Backtest settings</h2>
+    <p>Fills are modelled explicitly — a signal on bar <i>i</i> transacts at the <b>open of bar i+1</b> by default, which is the earliest price you could realistically have gotten.</p>
+    <div class="settings-grid">
+      <label class="field"><span>Starting cash</span><input id="initialCash" type="number" value="100000" step="1000"></label>
+      <label class="field"><span>Default qty</span><input id="defaultQty" type="number" value="100" step="1"></label>
+      <label class="field"><span>Fill mode</span>
+        <select id="fillMode">
+          <option value="next_open" selected>Next bar open (realistic)</option>
+          <option value="close">Same bar close (optimistic)</option>
+        </select>
+      </label>
+      <label class="field"><span>Slippage (bps)</span><input id="slippageBps" type="number" value="0" step="1"></label>
+      <label class="field"><span>Commission / fill ($)</span><input id="commission" type="number" value="0" step="0.01"></label>
+      <label class="field"><span>Max bars</span><input id="maxBars" type="number" value="20000" step="1000"></label>
+    </div>
+    <div class="row"><div class="spacer"></div><button class="primary" id="btnSettingsClose">Done</button></div>
+  </div>
+</div>
+
+<!-- Save -->
+<div class="modal-back" id="saveModal">
+  <div class="modal">
+    <h2>Save strategy</h2>
+    <p>Saved to <code>strategies/</code> with its language, params and symbol.</p>
+    <label class="field"><span>Name</span><input id="saveName" placeholder="MA crossover"></label>
+    <div class="row"><button class="primary" id="btnSaveConfirm">Save</button><div class="spacer"></div><button class="ghost" id="btnSaveClose">Cancel</button></div>
+  </div>
+</div>
+
+<!-- Open -->
+<div class="modal-back" id="loadModal">
+  <div class="modal">
+    <h2>Open strategy</h2>
+    <ul class="strat-list" id="stratList"></ul>
+    <div class="row"><div class="spacer"></div><button class="ghost" id="btnLoadClose">Close</button></div>
+  </div>
+</div>
+
+<!-- API reference -->
+<div class="modal-back" id="apiModal">
+  <div class="modal" style="width:640px">
+    <h2>ctx API</h2>
+    <p>Identical concepts in every language — <b>snake_case</b> in Python/Ruby, <b>camelCase</b> in JavaScript.</p>
+    <pre class="console" id="apiRefBody"></pre>
+    <div class="row"><div class="spacer"></div><button class="ghost" id="btnApiClose">Close</button></div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

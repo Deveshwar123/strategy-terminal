@@ -1,0 +1,9 @@
+# API keys — never commit
+.credentials.json
+
+# saved strategies are personal
+strategies/*.json
+
+node_modules/
+.DS_Store
+data/
