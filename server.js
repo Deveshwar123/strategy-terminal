@@ -9,7 +9,7 @@ const path = require('node:path');
 const { URL } = require('node:url');
 
 const engine = require('./engine');
-const av = require('./alphavantage');
+const providers = require('./providers');
 
 const PORT = Number(process.env.PORT || 4477);
 const ROOT = __dirname;
@@ -31,8 +31,19 @@ function saveCreds(c) {
 
 function requireCreds() {
   const c = loadCreds();
-  if (!c || !c.apiKey) throw httpErr(401, 'No Alpha Vantage API key set. Add it first.');
+  if (!c || !c.apiKey) throw httpErr(401, 'No API key set. Add one in the API Keys dialog.');
   return c;
+}
+
+// The active provider is whatever the stored credentials name.
+function activeProvider() {
+  const c = loadCreds();
+  return providers.get(c && c.provider);
+}
+
+function withProvider() {
+  const creds = requireCreds();
+  return { creds, prov: providers.get(creds.provider), api: providers.get(creds.provider).module };
 }
 
 function httpErr(status, message) {
@@ -55,7 +66,8 @@ async function livePoll() {
   try {
     const c = live.cfg;
     // force:true bypasses the disk cache -- the whole point of a live tick is fresh data.
-    const { bars } = await av.fetchBars(
+    const api = providers.get(creds.provider).module;
+    const { bars } = await api.fetchBars(
       { symbol: c.symbol, timeframe: c.timeframe, start: c.start, end: '', force: true },
       creds.apiKey
     );
@@ -76,9 +88,10 @@ async function livePoll() {
     live.ticks++;
     live.barsAdded += added;
 
-    // Stop rather than silently burn the rest of the daily quota.
-    if (av.usage().remaining <= 0) {
-      live.lastError = 'Daily Alpha Vantage quota exhausted — live session stopped.';
+    // Stop rather than silently burn through a hard quota (Alpha Vantage's daily cap).
+    const u = api.usage();
+    if (u.label === 'today' && u.remaining <= 0) {
+      live.lastError = `Quota exhausted (${u.used}/${u.limit} ${u.label}) — live session stopped.`;
       stopLive();
     }
   } catch (e) {
@@ -100,7 +113,7 @@ function liveState() {
     startedAt: live.startedAt, lastPoll: live.lastPoll, lastError: live.lastError,
     ticks: live.ticks, barCount: live.bars.length, barsAdded: live.barsAdded,
     liveStartIndex: live.liveStartIndex, bars: live.bars, result: live.result,
-    usage: av.usage(),
+    usage: safeUsage(),
   };
 }
 
@@ -122,30 +135,40 @@ function readBody(req) {
   });
 }
 
+function safeUsage() {
+  try { return activeProvider().module.usage(); } catch { return null; }
+}
+
 const routes = {
   'GET /api/languages': async () => ({ languages: engine.probeLanguages() }),
 
-  'GET /api/usage': async () => av.usage(),
+  'GET /api/providers': async () => ({ providers: providers.list(), default: providers.DEFAULT }),
+
+  'GET /api/usage': async () => safeUsage(),
 
   'GET /api/status': async () => {
     const creds = loadCreds();
-    if (!creds || !creds.apiKey) return { connected: false, usage: av.usage() };
+    if (!creds || !creds.apiKey) return { connected: false, providers: providers.list(), default: providers.DEFAULT };
+    const prov = providers.get(creds.provider);
     return {
       connected: true,
-      provider: 'Alpha Vantage',
+      provider: prov.id,
+      providerLabel: prov.label,
       keyPreview: creds.apiKey.slice(0, 4) + '…' + creds.apiKey.slice(-3),
       verifiedAt: creds.verifiedAt,
-      usage: av.usage(),
-      timeframes: Object.keys(av.TIMEFRAMES),
+      usage: prov.module.usage(),
+      timeframes: Object.keys(prov.module.TIMEFRAMES),
+      providers: providers.list(),
     };
   },
 
   'POST /api/connect': async (body) => {
     const apiKey = (body.apiKey || '').trim();
     if (!apiKey) throw httpErr(400, 'API key is required.');
-    const quote = await av.verifyKey(apiKey); // costs one request
-    saveCreds({ provider: 'alphavantage', apiKey, verifiedAt: new Date().toISOString() });
-    return { connected: true, quote, usage: av.usage() };
+    const prov = providers.get(body.provider);
+    const quote = await prov.module.verifyKey(apiKey); // costs one request
+    saveCreds({ provider: prov.id, apiKey, verifiedAt: new Date().toISOString() });
+    return { connected: true, provider: prov.id, providerLabel: prov.label, quote, usage: prov.module.usage() };
   },
 
   'POST /api/disconnect': async () => {
@@ -154,50 +177,56 @@ const routes = {
   },
 
   'POST /api/bars': async (body) => {
-    const creds = requireCreds();
-    const { bars, meta } = await av.fetchBars(body, creds.apiKey);
+    const { creds, api } = withProvider();
+    const { bars, meta } = await api.fetchBars(body, creds.apiKey);
     return { symbol: String(body.symbol).toUpperCase(), timeframe: body.timeframe, count: bars.length, bars, meta };
   },
 
   'POST /api/quote': async (body) => {
-    const creds = requireCreds();
-    return av.latestQuote(body.symbol, creds.apiKey);
+    const { creds, api } = withProvider();
+    return api.latestQuote(body.symbol, creds.apiKey);
   },
 
   'POST /api/run': async (body) => {
-    const creds = requireCreds();
+    const { creds, prov, api } = withProvider();
     const { language, code, symbol, timeframe, start, end, params, config } = body;
     if (!code || !code.trim()) throw httpErr(400, 'No strategy code.');
     if (!symbol) throw httpErr(400, 'No symbol.');
 
-    const { bars, meta } = await av.fetchBars(
+    const { bars, meta } = await api.fetchBars(
       { symbol, timeframe, start, end, limit: body.maxBars, force: body.force },
       creds.apiKey
     );
 
     if (bars.length < 2) {
       throw httpErr(422,
-        `Alpha Vantage returned ${bars.length} bars for ${String(symbol).toUpperCase()} ${timeframe} in that date range` +
+        `${prov.label} returned ${bars.length} bars for ${String(symbol).toUpperCase()} ${timeframe} in that date range` +
         (meta.availableBars ? ` (${meta.availableBars} bars exist outside it — earliest is ${meta.earliest || 'unknown'}).` : '.') +
-        `\n\nCheck the symbol and widen the dates. Intraday timeframes only go back ~30 days without per-month requests.`);
+        `\n\nCheck the symbol and widen the dates.` +
+        (prov.id === 'finnhub'
+          ? ` For Finnhub, a bare ticker means US equities; crypto needs a venue prefix like BINANCE:BTCUSDT.`
+          : ` Intraday timeframes only go back ~30 days without per-month requests.`));
     }
 
     const result = await engine.backtest({
       language, code, bars, params,
       config: { ...(config || {}), symbol: String(symbol).toUpperCase(), timeframe },
     });
-    return { ...result, bars, meta, usage: av.usage(), symbol: String(symbol).toUpperCase(), timeframe, language };
+    return { ...result, bars, meta, usage: api.usage(), provider: prov.id, symbol: String(symbol).toUpperCase(), timeframe, language };
   },
 
   'POST /api/live/start': async (body) => {
-    const creds = requireCreds();
+    const { creds, prov, api } = withProvider();
     if (live.running) throw httpErr(409, 'A live session is already running.');
 
-    const pollSeconds = Math.max(60, Number(body.pollSeconds) || 900);
+    // Finnhub's limit is per minute, so it can poll far more often than Alpha Vantage's
+    // 25/day allows. Floor the interval accordingly.
+    const floor = prov.id === 'finnhub' ? 15 : 300;
+    const pollSeconds = Math.max(floor, Number(body.pollSeconds) || (prov.id === 'finnhub' ? 60 : 900));
     const perHour = Math.ceil(3600 / pollSeconds);
-    const u = av.usage();
-    if (u.remaining < 3) {
-      throw httpErr(429, `Only ${u.remaining} Alpha Vantage requests left today — not enough to run a live session. Resets at midnight UTC.`);
+    const u = api.usage();
+    if (u.label === 'today' && u.remaining < 3) {
+      throw httpErr(429, `Only ${u.remaining} ${prov.label} requests left ${u.label} — not enough to run a live session. Resets ${u.resets}.`);
     }
 
     const c = {
@@ -209,7 +238,7 @@ const routes = {
     };
     if (!c.symbol || !c.code) throw httpErr(400, 'Symbol and code are required.');
 
-    const { bars } = await av.fetchBars({ symbol: c.symbol, timeframe: c.timeframe, start: c.start, end: '' }, creds.apiKey);
+    const { bars } = await api.fetchBars({ symbol: c.symbol, timeframe: c.timeframe, start: c.start, end: '' }, creds.apiKey);
     if (!bars.length) throw httpErr(422, `No bars returned for ${c.symbol} ${c.timeframe}.`);
 
     live.bars = bars;
@@ -287,13 +316,19 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   const ready = Object.values(engine.probeLanguages()).filter((l) => l.available).map((l) => `${l.label} (${l.version})`);
-  const u = av.usage();
+  const creds = loadCreds();
   console.log('');
   console.log('  Strategy Terminal');
   console.log(`  →  http://localhost:${PORT}`);
-  console.log(`  runtimes: ${ready.join(', ') || 'none found'}`);
-  console.log(`  data:     Alpha Vantage — ${loadCreds() ? 'key loaded' : 'no key yet, add it in the UI'}`);
-  console.log(`  quota:    ${u.used}/${u.limit} requests used today`);
+  console.log(`  runtimes:  ${ready.join(', ') || 'none found'}`);
+  console.log(`  providers: ${providers.list().map((p) => p.label).join(', ')}`);
+  if (creds) {
+    const prov = providers.get(creds.provider);
+    const u = prov.module.usage();
+    console.log(`  active:    ${prov.label} — key loaded, ${u.used}/${u.limit} requests ${u.label}`);
+  } else {
+    console.log(`  active:    none — add a key in the UI (default ${providers.get().label})`);
+  }
   console.log('');
 });
 

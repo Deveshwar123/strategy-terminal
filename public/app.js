@@ -166,6 +166,8 @@ NO LOOKAHEAD       ctx never exposes a bar past the current one. Indicators are
 
 const state = {
   languages: {},
+  providers: [],
+  provider: null,
   result: null,
   bars: [],
   live: null,
@@ -401,13 +403,15 @@ function renderResult(r, bars, opts) {
   // Free-tier Alpha Vantage data is not split-adjusted, and an unadjusted split reads
   // as a real overnight move — worth flagging before you believe the P&L.
   if (r.meta && r.meta.suspectSplits && r.meta.suspectSplits.length) {
-    warnings.push(
-      `Possible unadjusted split: price gapped ${r.meta.suspectSplits.map((x) => `${nf(x.ratio, 2)}× on ${fmtTime(x.t, r.timeframe)}`).join(', ')}. ` +
-      `Alpha Vantage's free daily series is raw, not split-adjusted, so a split looks like a real overnight move and the backtest will book it as P&L.`);
+    const gaps = r.meta.suspectSplits.map((x) => `${nf(x.ratio, 2)}× on ${fmtTime(x.t, r.timeframe)}`).join(', ');
+    warnings.push(r.meta.adjusted
+      ? `Large single-bar gap: ${gaps}. This feed is split-adjusted, so it's more likely a real move, a corporate action, or a thin symbol — but check it before trusting the P&L.`
+      : `Possible unadjusted split: price gapped ${gaps}. This feed is raw, not split-adjusted, so a split looks like a real overnight move and the backtest will book it as P&L.`);
   }
 
+  const provName = r.meta && r.meta.provider === 'finnhub' ? 'Finnhub' : 'Alpha Vantage';
   const src = r.meta
-    ? `<div class="banner info">Data: Alpha Vantage · ${r.meta.cached ? `served from local cache (fetched ${new Date(r.meta.fetchedAt).toLocaleString()}) — 0 requests spent` : `${r.meta.apiCalls} request${r.meta.apiCalls === 1 ? '' : 's'} spent`}${r.usage ? ` · ${r.usage.used}/${r.usage.limit} used today` : ''}</div>`
+    ? `<div class="banner info">Data: ${esc(provName)}${r.meta.assetClass ? ` (${esc(r.meta.assetClass)})` : ''} · ${r.meta.cached ? `served from local cache (fetched ${new Date(r.meta.fetchedAt).toLocaleString()}) — 0 requests spent` : `${r.meta.apiCalls} request${r.meta.apiCalls === 1 ? '' : 's'} spent`}${r.usage ? ` · ${r.usage.used}/${r.usage.limit} ${esc(r.usage.label)}` : ''}</div>`
     : '';
 
   host.innerHTML = `
@@ -565,7 +569,7 @@ async function runBacktest() {
   try {
     const params = readParams();
     busy(btn, true, 'Running…');
-    $('#resultsBody').innerHTML = '<div class="empty">Fetching bars from Alpha Vantage (or local cache) and running your strategy…</div>';
+    $('#resultsBody').innerHTML = '<div class="empty">Fetching bars (or reading local cache) and running your strategy…</div>';
 
     const res = await api('/api/run', {
       language: $('#language').value,
@@ -616,7 +620,8 @@ async function toggleLive() {
   }
   try {
     busy(btn, true, 'Starting…');
-    // Each live tick costs one of 25 daily requests, so the floor is minutes, not seconds.
+    // Poll cadence depends on the provider: Finnhub's limit is per-minute so it can go
+    // fast; Alpha Vantage's 25/day means minutes, not seconds. Server clamps this too.
     await api('/api/live/start', {
       symbol: $('#symbol').value.trim(),
       timeframe: $('#timeframe').value,
@@ -625,7 +630,9 @@ async function toggleLive() {
       params: readParams(),
       config: readConfig(),
       start: $('#start').value,
-      pollSeconds: /Min/.test($('#timeframe').value) ? 300 : 900,
+      pollSeconds: state.provider === 'finnhub'
+        ? (/Min/.test($('#timeframe').value) ? 30 : 120)
+        : (/Min/.test($('#timeframe').value) ? 300 : 900),
     });
     btn.dataset.label = '■ Stop Live';
     busy(btn, false);
@@ -655,20 +662,21 @@ async function refreshLive() {
 
   const pane = $('#pane-live');
   if (!st.running && !st.result) {
-    pane.innerHTML = '<div class="empty">Not running. <b>Go Live</b> polls Alpha Vantage for fresh bars and runs your strategy forward with simulated fills — no orders are ever placed.</div>';
+    pane.innerHTML = '<div class="empty">Not running. <b>Go Live</b> polls your data provider for fresh bars and runs your strategy forward with simulated fills — no orders are ever placed.</div>';
     return;
   }
 
   if (st.usage) renderUsage(st.usage);
-  const mins = st.cfg ? Math.round(st.cfg.pollSeconds / 60) : 0;
+  const secs = st.cfg ? st.cfg.pollSeconds : 0;
+  const every = secs >= 60 ? `${Math.round(secs / 60)} min` : `${secs}s`;
   const head = `
     <div class="banner ${st.lastError ? 'error' : 'info'}">
-      ${st.running ? '● LIVE' : '■ STOPPED'} · ${esc(st.cfg ? st.cfg.symbol + ' ' + st.cfg.timeframe : '')} · polling every ${mins} min
+      ${st.running ? '● LIVE' : '■ STOPPED'} · ${esc(st.cfg ? st.cfg.symbol + ' ' + st.cfg.timeframe : '')} · polling every ${every}
       · ${st.barCount} bars (${st.barsAdded} new since start) · tick ${st.ticks}
       ${st.lastPoll ? '· last ' + new Date(st.lastPoll).toLocaleTimeString() : ''}
       ${st.lastError ? '\n⚠ ' + esc(st.lastError) : ''}
       <br><span style="color:var(--text-muted)">Simulated fills only — no order is ever placed anywhere.
-      Each tick spends one Alpha Vantage request (${st.cfg ? st.cfg.perHour : '—'}/hour against a 25/day cap), so a free-tier session lasts roughly ${st.usage ? Math.floor(st.usage.remaining / Math.max(1, st.cfg ? st.cfg.perHour : 1)) : '—'} more hour(s) before the quota runs out.</span>
+      Each tick spends one request (~${st.cfg ? st.cfg.perHour : '—'}/hour)${st.usage ? ` against a ${st.usage.limit}-${st.usage.label === 'today' ? 'per-day' : 'per-minute'} limit` : ''}.</span>
     </div>
     <div id="liveBody"></div>`;
 
@@ -688,10 +696,29 @@ async function refreshLive() {
 // ------------------------------------------------------------------ status
 
 function renderUsage(u) {
-  if (!u) return;
+  if (!u) { $('#usagePill').hidden = true; return; }
   $('#usagePill').hidden = false;
-  $('#usageText').textContent = `${u.used}/${u.limit} requests today`;
-  $('#usageDot').className = 'dot ' + (u.remaining <= 0 ? 'off' : u.remaining <= 5 ? 'warn' : 'on');
+  $('#usageText').textContent = `${u.used}/${u.limit} requests ${u.label}`;
+  $('#usagePill').title = `Resets: ${u.resets}. Cached data costs nothing.`;
+  // A per-minute budget refilling on its own isn't worth alarming about; a daily one is.
+  const tight = u.label === 'today' ? 5 : 10;
+  $('#usageDot').className = 'dot ' + (u.remaining <= 0 ? 'off' : u.remaining <= tight ? 'warn' : 'on');
+}
+
+function renderProviderPicker(list, selected) {
+  if (!list || !list.length) return;
+  state.providers = list;
+  const sel = $('#provider');
+  if (sel.options.length !== list.length) {
+    sel.innerHTML = list.map((p) => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join('');
+  }
+  sel.value = selected || sel.value || list[0].id;
+  const p = list.find((x) => x.id === sel.value) || list[0];
+  $('#apiKey').placeholder = p.keyPlaceholder || '';
+  $('#keyLink').innerHTML = `— <a href="${esc(p.keyUrl)}" target="_blank" rel="noreferrer">get one</a>`;
+  $('#provLimit').textContent = p.limitNote || '';
+  $('#provWarn').innerHTML = p.warning ? esc(p.warning) : '';
+  $('#provWarn').hidden = !p.warning;
 }
 
 async function refreshStatus() {
@@ -700,12 +727,14 @@ async function refreshStatus() {
     const dot = $('#connDot'), txt = $('#connText');
     if (st.connected) {
       dot.className = 'dot on';
-      txt.textContent = `Alpha Vantage · ${st.keyPreview}`;
+      txt.textContent = `${st.providerLabel} · ${st.keyPreview}`;
+      state.provider = st.provider;
     } else {
       dot.className = 'dot off';
       txt.textContent = 'no API key';
       $('#keysModal').classList.add('open');
     }
+    renderProviderPicker(st.providers, st.provider || st.default);
     renderUsage(st.usage);
   } catch {
     $('#connDot').className = 'dot off';
@@ -752,12 +781,16 @@ $('#btnSaveClose').onclick = () => modal('#saveModal', false);
 $('#btnLoadClose').onclick = () => modal('#loadModal', false);
 $$('.modal-back').forEach((m) => m.addEventListener('click', (e) => { if (e.target === m) m.classList.remove('open'); }));
 
+$('#provider').addEventListener('change', () => renderProviderPicker(state.providers, $('#provider').value));
+
 $('#btnConnect').onclick = async () => {
   const msg = $('#keysMsg');
-  msg.innerHTML = '<div class="banner info">Verifying with Alpha Vantage…</div>';
+  const provId = $('#provider').value;
+  const prov = state.providers.find((p) => p.id === provId);
+  msg.innerHTML = `<div class="banner info">Verifying with ${esc(prov ? prov.label : provId)}…</div>`;
   try {
-    const r = await api('/api/connect', { apiKey: $('#apiKey').value });
-    msg.innerHTML = `<div class="banner info">Connected. Key saved locally. Test quote: ${esc(r.quote.symbol)} @ ${nf(r.quote.price)} (${esc(r.quote.tradingDay)}).</div>`;
+    const r = await api('/api/connect', { provider: provId, apiKey: $('#apiKey').value });
+    msg.innerHTML = `<div class="banner info">Connected to ${esc(r.providerLabel)}. Key saved locally. Test quote: ${esc(r.quote.symbol)} @ ${nf(r.quote.price)}.</div>`;
     await refreshStatus();
     setTimeout(() => modal('#keysModal', false), 1200);
   } catch (e) {

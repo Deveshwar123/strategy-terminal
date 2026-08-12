@@ -11,7 +11,7 @@ const path = require('node:path');
 const { URL } = require('node:url');
 
 const HOST = 'www.alphavantage.co';
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = path.join(__dirname, '..', 'data');
 const USAGE_FILE = path.join(DATA_DIR, 'usage.json');
 
 const FREE_DAILY_LIMIT = 25;
@@ -57,7 +57,16 @@ function bumpUsage(label) {
 
 function usage() {
   const u = readUsage();
-  return { date: u.date, used: u.count, limit: FREE_DAILY_LIMIT, remaining: Math.max(0, FREE_DAILY_LIMIT - u.count), recent: (u.calls || []).slice(-10).reverse() };
+  return {
+    provider: 'alphavantage',
+    label: 'today',
+    date: u.date,
+    used: u.count,
+    limit: FREE_DAILY_LIMIT,
+    remaining: Math.max(0, FREE_DAILY_LIMIT - u.count),
+    resets: 'midnight UTC',
+    recent: (u.calls || []).slice(-10).reverse(),
+  };
 }
 
 // ------------------------------------------------------------------ fetching
