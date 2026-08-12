@@ -398,9 +398,21 @@ function renderResult(r, bars, opts) {
   if (s.numTrades === 0) {
     warnings.push('Strategy produced no completed round trips. Check your entry conditions, or whether indicators are still in warmup for most of the range.');
   }
+  // Free-tier Alpha Vantage data is not split-adjusted, and an unadjusted split reads
+  // as a real overnight move — worth flagging before you believe the P&L.
+  if (r.meta && r.meta.suspectSplits && r.meta.suspectSplits.length) {
+    warnings.push(
+      `Possible unadjusted split: price gapped ${r.meta.suspectSplits.map((x) => `${nf(x.ratio, 2)}× on ${fmtTime(x.t, r.timeframe)}`).join(', ')}. ` +
+      `Alpha Vantage's free daily series is raw, not split-adjusted, so a split looks like a real overnight move and the backtest will book it as P&L.`);
+  }
+
+  const src = r.meta
+    ? `<div class="banner info">Data: Alpha Vantage · ${r.meta.cached ? `served from local cache (fetched ${new Date(r.meta.fetchedAt).toLocaleString()}) — 0 requests spent` : `${r.meta.apiCalls} request${r.meta.apiCalls === 1 ? '' : 's'} spent`}${r.usage ? ` · ${r.usage.used}/${r.usage.limit} used today` : ''}</div>`
+    : '';
 
   host.innerHTML = `
     ${warnings.map((w) => `<div class="banner warn">${esc(w)}</div>`).join('')}
+    ${src}
     <div class="stats">
       ${statTile('Total return', pct(s.totalReturn), money(s.finalEquity) + ' final', cls(s.totalReturn))}
       ${statTile('vs Buy & hold', pct(s.alpha), pct(s.buyHoldReturn) + ' B&H', cls(s.alpha))}
@@ -553,7 +565,7 @@ async function runBacktest() {
   try {
     const params = readParams();
     busy(btn, true, 'Running…');
-    $('#resultsBody').innerHTML = '<div class="empty">Fetching bars from Alpaca and running your strategy…</div>';
+    $('#resultsBody').innerHTML = '<div class="empty">Fetching bars from Alpha Vantage (or local cache) and running your strategy…</div>';
 
     const res = await api('/api/run', {
       language: $('#language').value,
@@ -569,6 +581,7 @@ async function runBacktest() {
 
     state.result = res;
     state.bars = res.bars;
+    renderUsage(res.usage);
 
     if (!res.ok) {
       $('#resultsBody').innerHTML =
@@ -603,6 +616,7 @@ async function toggleLive() {
   }
   try {
     busy(btn, true, 'Starting…');
+    // Each live tick costs one of 25 daily requests, so the floor is minutes, not seconds.
     await api('/api/live/start', {
       symbol: $('#symbol').value.trim(),
       timeframe: $('#timeframe').value,
@@ -610,8 +624,8 @@ async function toggleLive() {
       code: codeEl.value,
       params: readParams(),
       config: readConfig(),
-      pollSeconds: /Min/.test($('#timeframe').value) ? 20 : 60,
-      warmupBars: 400,
+      start: $('#start').value,
+      pollSeconds: /Min/.test($('#timeframe').value) ? 300 : 900,
     });
     btn.dataset.label = '■ Stop Live';
     busy(btn, false);
@@ -641,17 +655,20 @@ async function refreshLive() {
 
   const pane = $('#pane-live');
   if (!st.running && !st.result) {
-    pane.innerHTML = '<div class="empty">Not running. <b>Go Live</b> streams fresh bars from Alpaca and runs your strategy forward with simulated fills — no orders are ever sent.</div>';
+    pane.innerHTML = '<div class="empty">Not running. <b>Go Live</b> polls Alpha Vantage for fresh bars and runs your strategy forward with simulated fills — no orders are ever placed.</div>';
     return;
   }
 
+  if (st.usage) renderUsage(st.usage);
+  const mins = st.cfg ? Math.round(st.cfg.pollSeconds / 60) : 0;
   const head = `
     <div class="banner ${st.lastError ? 'error' : 'info'}">
-      ${st.running ? '● LIVE' : '■ STOPPED'} · ${esc(st.cfg ? st.cfg.symbol + ' ' + st.cfg.timeframe : '')} · polling every ${st.cfg ? st.cfg.pollSeconds : '—'}s
+      ${st.running ? '● LIVE' : '■ STOPPED'} · ${esc(st.cfg ? st.cfg.symbol + ' ' + st.cfg.timeframe : '')} · polling every ${mins} min
       · ${st.barCount} bars (${st.barsAdded} new since start) · tick ${st.ticks}
       ${st.lastPoll ? '· last ' + new Date(st.lastPoll).toLocaleTimeString() : ''}
       ${st.lastError ? '\n⚠ ' + esc(st.lastError) : ''}
-      <br><span style="color:var(--text-muted)">Simulated fills only — this never places an order on your Alpaca account.</span>
+      <br><span style="color:var(--text-muted)">Simulated fills only — no order is ever placed anywhere.
+      Each tick spends one Alpha Vantage request (${st.cfg ? st.cfg.perHour : '—'}/hour against a 25/day cap), so a free-tier session lasts roughly ${st.usage ? Math.floor(st.usage.remaining / Math.max(1, st.cfg ? st.cfg.perHour : 1)) : '—'} more hour(s) before the quota runs out.</span>
     </div>
     <div id="liveBody"></div>`;
 
@@ -670,30 +687,30 @@ async function refreshLive() {
 
 // ------------------------------------------------------------------ status
 
+function renderUsage(u) {
+  if (!u) return;
+  $('#usagePill').hidden = false;
+  $('#usageText').textContent = `${u.used}/${u.limit} requests today`;
+  $('#usageDot').className = 'dot ' + (u.remaining <= 0 ? 'off' : u.remaining <= 5 ? 'warn' : 'on');
+}
+
 async function refreshStatus() {
   try {
     const st = await api('/api/status');
     const dot = $('#connDot'), txt = $('#connText');
     if (st.connected) {
       dot.className = 'dot on';
-      txt.textContent = `${st.paper ? 'PAPER' : 'LIVE'} · ${st.keyPreview} · ${st.feed.toUpperCase()}`;
-      $('#acctPill').hidden = false;
-      $('#acctPill').textContent = `equity ${money(st.account.equity)}`;
-      $('#clockPill').hidden = false;
-      $('#clockDot').className = 'dot ' + (st.clock.isOpen ? 'on' : 'off');
-      $('#clockText').textContent = st.clock.isOpen
-        ? 'market open'
-        : 'closed · opens ' + new Date(st.clock.nextOpen).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      txt.textContent = `Alpha Vantage · ${st.keyPreview}`;
     } else {
-      dot.className = 'dot ' + (st.error ? 'warn' : 'off');
-      txt.textContent = st.error ? 'key rejected: ' + st.error.slice(0, 40) : 'no API keys';
-      $('#acctPill').hidden = true;
-      $('#clockPill').hidden = true;
-      if (!st.error) $('#keysModal').classList.add('open');
+      dot.className = 'dot off';
+      txt.textContent = 'no API key';
+      $('#keysModal').classList.add('open');
     }
+    renderUsage(st.usage);
   } catch {
     $('#connDot').className = 'dot off';
     $('#connText').textContent = 'server unreachable';
+    $('#usagePill').hidden = true;
   }
 }
 
@@ -737,23 +754,17 @@ $$('.modal-back').forEach((m) => m.addEventListener('click', (e) => { if (e.targ
 
 $('#btnConnect').onclick = async () => {
   const msg = $('#keysMsg');
-  msg.innerHTML = '<div class="banner info">Verifying with Alpaca…</div>';
+  msg.innerHTML = '<div class="banner info">Verifying with Alpha Vantage…</div>';
   try {
-    await api('/api/connect', {
-      keyId: $('#keyId').value,
-      secretKey: $('#secretKey').value,
-      paper: $('#paperMode').value === 'paper',
-      feed: $('#feed').value,
-    });
-    msg.innerHTML = '<div class="banner info">Connected. Keys saved locally.</div>';
-    $('#secretKey').value = '';
+    const r = await api('/api/connect', { apiKey: $('#apiKey').value });
+    msg.innerHTML = `<div class="banner info">Connected. Key saved locally. Test quote: ${esc(r.quote.symbol)} @ ${nf(r.quote.price)} (${esc(r.quote.tradingDay)}).</div>`;
     await refreshStatus();
-    setTimeout(() => modal('#keysModal', false), 700);
+    setTimeout(() => modal('#keysModal', false), 1200);
   } catch (e) {
     msg.innerHTML = `<div class="banner error">${esc(e.message)}</div>`;
   }
 };
-$('#btnDisconnect').onclick = async () => { await api('/api/disconnect', {}); $('#keysMsg').innerHTML = ''; refreshStatus(); };
+$('#btnDisconnect').onclick = async () => { await api('/api/disconnect', {}); $('#keysMsg').innerHTML = ''; $('#apiKey').value = ''; refreshStatus(); };
 
 $('#btnTemplate').onclick = () => {
   const lang = $('#language').value;

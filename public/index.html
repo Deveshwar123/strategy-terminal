@@ -13,8 +13,7 @@
   <header class="topbar">
     <div class="brand">STRATEGY<em>·</em>TERMINAL</div>
     <span class="pill" id="connPill"><span class="dot" id="connDot"></span><span id="connText">checking…</span></span>
-    <span class="pill" id="clockPill" hidden><span class="dot" id="clockDot"></span><span id="clockText"></span></span>
-    <span class="pill" id="acctPill" hidden></span>
+    <span class="pill" id="usagePill" hidden title="Alpha Vantage free tier: 25 requests/day. Cached data is free."><span class="dot" id="usageDot"></span><span id="usageText"></span></span>
     <div class="spacer"></div>
     <span class="pill" id="langPill" title="Detected runtimes"></span>
     <button class="ghost" id="btnKeys">API Keys</button>
@@ -25,7 +24,7 @@
     <label class="field"><span>Timeframe</span>
       <select id="timeframe">
         <option>1Min</option><option>5Min</option><option>15Min</option><option>30Min</option>
-        <option>1Hour</option><option selected>1Day</option><option>1Week</option>
+        <option>1Hour</option><option selected>1Day</option><option>1Week</option><option>1Month</option>
       </select>
     </label>
     <label class="field"><span>Start</span><input type="date" id="start"></label>
@@ -73,7 +72,7 @@
         </div>
         <div class="tabpane" id="pane-trades"><div class="empty">No trades yet.</div></div>
         <div class="tabpane" id="pane-console"><div class="empty">No output yet.</div></div>
-        <div class="tabpane" id="pane-live"><div class="empty">Not running. <b>Go Live</b> streams fresh bars from Alpaca and runs your strategy forward with simulated fills — no orders are ever sent.</div></div>
+        <div class="tabpane" id="pane-live"><div class="empty">Not running. <b>Go Live</b> polls Alpha Vantage for fresh bars and runs your strategy forward with simulated fills — no orders are ever placed.</div></div>
       </div>
     </section>
   </main>
@@ -84,14 +83,10 @@
 <!-- API keys -->
 <div class="modal-back" id="keysModal">
   <div class="modal">
-    <h2>Alpaca API keys</h2>
-    <p>Stored in <code>.credentials.json</code> next to the server (chmod 600), never sent anywhere but Alpaca. Generate keys at <a href="https://app.alpaca.markets/paper/dashboard/overview" target="_blank" rel="noreferrer">app.alpaca.markets</a>.</p>
-    <label class="field"><span>API Key ID</span><input id="keyId" spellcheck="false" placeholder="PK…"></label>
-    <label class="field"><span>Secret Key</span><input id="secretKey" type="password" spellcheck="false"></label>
-    <div class="settings-grid">
-      <label class="field"><span>Account</span><select id="paperMode"><option value="paper" selected>Paper</option><option value="live">Live</option></select></label>
-      <label class="field"><span>Data feed</span><select id="feed"><option value="iex" selected>IEX (free)</option><option value="sip">SIP (paid)</option></select></label>
-    </div>
+    <h2>Alpha Vantage API key</h2>
+    <p>Stored in <code>.credentials.json</code> next to the server (chmod 600), never sent anywhere but Alpha Vantage. Get a free key at <a href="https://www.alphavantage.co/support/#api-key" target="_blank" rel="noreferrer">alphavantage.co</a>.</p>
+    <label class="field"><span>API Key</span><input id="apiKey" spellcheck="false" placeholder="e.g. J8KD91MZQ4RTVX02"></label>
+    <div class="banner warn" style="margin-top:12px">The free tier allows <b>25 requests per day</b>. Connecting spends one to verify the key. Every fetch is cached to <code>data/</code>, so re-running a backtest on a range you already pulled costs nothing.</div>
     <div id="keysMsg"></div>
     <div class="row">
       <button class="primary" id="btnConnect">Connect</button>
