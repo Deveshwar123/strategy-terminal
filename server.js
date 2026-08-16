@@ -15,41 +15,18 @@ const PORT = Number(process.env.PORT || 4477);
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
 const STRATEGY_DIR = path.join(ROOT, 'strategies');
-const CRED_FILE = path.join(ROOT, '.credentials.json');
 
-// ------------------------------------------------------------- credentials
+// ---------------------------------------------------------------- provider
+// There is exactly one provider and it needs no credentials, so there is nothing to
+// store, verify, gate or forget. Every route just asks the registry for it.
 
-function loadCreds() {
-  try { return JSON.parse(fs.readFileSync(CRED_FILE, 'utf8')); }
-  catch { return null; }
-}
-
-function saveCreds(c) {
-  fs.writeFileSync(CRED_FILE, JSON.stringify(c, null, 2), { mode: 0o600 });
-  try { fs.chmodSync(CRED_FILE, 0o600); } catch {}
-}
-
-// A keyless provider (Yahoo) has nothing to store, so an absent .credentials.json is a
-// working state rather than an error — fall through to the default provider.
-function requireCreds() {
-  const c = loadCreds();
-  if (!c || !c.apiKey) {
-    const prov = providers.get(c && c.provider);
-    if (prov.keyless) return { provider: prov.id, apiKey: null };
-    throw httpErr(401, `No API key set for ${prov.label}. Add one in the API Keys dialog, or switch to a keyless provider.`);
-  }
-  return c;
-}
-
-// The active provider is whatever the stored credentials name.
 function activeProvider() {
-  const c = loadCreds();
-  return providers.get(c && c.provider);
+  return providers.get(providers.DEFAULT);
 }
 
 function withProvider() {
-  const creds = requireCreds();
-  return { creds, prov: providers.get(creds.provider), api: providers.get(creds.provider).module };
+  const prov = activeProvider();
+  return { prov, api: prov.module };
 }
 
 function httpErr(status, message) {
@@ -67,12 +44,11 @@ const live = {
 };
 
 async function livePoll() {
-  const creds = loadCreds();
-  if (!creds || !live.running) return;
+  if (!live.running) return;
   try {
     const c = live.cfg;
     // force:true bypasses the disk cache -- the whole point of a live tick is fresh data.
-    const api = providers.get(creds.provider).module;
+    const { api } = withProvider();
 
     // A tick only needs bars newer than the ones already held. Re-pulling a max range
     // every poll would drag 30+ years across the wire to learn about one new bar, so the
@@ -83,8 +59,7 @@ async function livePoll() {
       : { start: c.start, range: c.range };
 
     const { bars } = await api.fetchBars(
-      { symbol: c.symbol, timeframe: c.timeframe, start: window.start, range: window.range, end: '', force: true },
-      creds.apiKey
+      { symbol: c.symbol, timeframe: c.timeframe, start: window.start, range: window.range, end: '', force: true }
     );
 
     let added = 0;
@@ -102,13 +77,6 @@ async function livePoll() {
     live.lastError = null;
     live.ticks++;
     live.barsAdded += added;
-
-    // Stop rather than silently burn through a hard quota (Alpha Vantage's daily cap).
-    const u = api.usage();
-    if (u.label === 'today' && u.remaining <= 0) {
-      live.lastError = `Quota exhausted (${u.used}/${u.limit} ${u.label}) — live session stopped.`;
-      stopLive();
-    }
   } catch (e) {
     live.lastError = e.message;
     if (e.rateLimited) stopLive();
@@ -161,71 +129,47 @@ const routes = {
 
   'GET /api/usage': async () => safeUsage(),
 
+  // No key means nothing can be "disconnected", so status is just: which feed, is it
+  // reachable, what has it been asked for lately.
   'GET /api/status': async () => {
-    const creds = loadCreds();
-    const prov = providers.get(creds && creds.provider);
-    // Keyless providers are connected by definition — there is no key to be missing.
-    if (!creds || !creds.apiKey) {
-      if (!prov.keyless) return { connected: false, providers: providers.list(), default: providers.DEFAULT };
-      return {
-        connected: true,
-        provider: prov.id,
-        providerLabel: prov.label,
-        keyPreview: 'no key needed',
-        keyless: true,
-        usage: prov.module.usage(),
-        timeframes: Object.keys(prov.module.TIMEFRAMES),
-        providers: providers.list(),
-      };
-    }
+    const prov = activeProvider();
     return {
       connected: true,
       provider: prov.id,
       providerLabel: prov.label,
-      keyPreview: creds.apiKey.slice(0, 4) + '…' + creds.apiKey.slice(-3),
-      keyless: !!prov.keyless,
-      verifiedAt: creds.verifiedAt,
       usage: prov.module.usage(),
       timeframes: Object.keys(prov.module.TIMEFRAMES),
       providers: providers.list(),
     };
   },
 
-  'POST /api/connect': async (body) => {
-    const apiKey = (body.apiKey || '').trim();
-    const prov = providers.get(body.provider);
-    if (!apiKey && !prov.keyless) throw httpErr(400, `An API key is required for ${prov.label}.`);
-    // For a keyless provider this is a reachability check, not a key check.
-    const quote = await prov.module.verifyKey(apiKey || null); // costs one request
-    saveCreds({ provider: prov.id, apiKey: apiKey || null, verifiedAt: new Date().toISOString() });
-    return { connected: true, provider: prov.id, providerLabel: prov.label, keyless: !!prov.keyless, quote, usage: prov.module.usage() };
-  },
-
-  'POST /api/disconnect': async () => {
-    try { fs.unlinkSync(CRED_FILE); } catch {}
-    return { connected: false };
+  // Spends one request to prove the endpoint answers from this machine, for when the
+  // question is "is it me or is it Yahoo".
+  'POST /api/check': async () => {
+    const prov = activeProvider();
+    const quote = await prov.module.checkReachable();
+    return { ok: true, provider: prov.id, providerLabel: prov.label, quote, usage: prov.module.usage() };
   },
 
   'POST /api/bars': async (body) => {
-    const { creds, api } = withProvider();
-    const { bars, meta } = await api.fetchBars(body, creds.apiKey);
+    const { api } = withProvider();
+    const { bars, meta } = await api.fetchBars(body);
     return { symbol: String(body.symbol).toUpperCase(), timeframe: body.timeframe, count: bars.length, bars, meta };
   },
 
   'POST /api/quote': async (body) => {
-    const { creds, api } = withProvider();
-    return api.latestQuote(body.symbol, creds.apiKey);
+    const { api } = withProvider();
+    return api.latestQuote(body.symbol);
   },
 
   'POST /api/run': async (body) => {
-    const { creds, prov, api } = withProvider();
+    const { prov, api } = withProvider();
     const { language, code, symbol, timeframe, start, end, range, params, config } = body;
     if (!code || !code.trim()) throw httpErr(400, 'No strategy code.');
     if (!symbol) throw httpErr(400, 'No symbol.');
 
     const { bars, meta } = await api.fetchBars(
-      { symbol, timeframe, start, end, range, limit: body.maxBars, force: body.force },
-      creds.apiKey
+      { symbol, timeframe, start, end, range, limit: body.maxBars, force: body.force }
     );
 
     if (bars.length < 2) {
@@ -235,13 +179,9 @@ const routes = {
         (range === 'max'
           ? `\n\nThe range was already Max (everything since inception), so this is a symbol or timeframe problem, not a date problem.`
           : `\n\nCheck the symbol and widen the dates — or set Range to Max.`) +
-        (prov.id === 'finnhub'
-          ? ` For Finnhub, a bare ticker means US equities; crypto needs a venue prefix like BINANCE:BTCUSDT.`
-          : prov.id === 'yahoo'
-            ? ` Yahoo symbols: bare tickers for US equities (AAPL, SPY), ^GSPC for indices, BTC-USD for crypto,` +
-              ` EURUSD=X for forex.` +
-              (meta.clamped ? ` Note: ${timeframe} history is capped at ${meta.clamped.maxDays} days, so the start date was clamped.` : '')
-            : ` Intraday timeframes only go back ~30 days without per-month requests.`));
+        ` Yahoo symbols: bare tickers for US equities (AAPL, SPY), ^GSPC for indices, BTC-USD for crypto,` +
+        ` EURUSD=X for forex.` +
+        (meta.clamped ? ` Note: ${timeframe} history is capped at ${meta.clamped.maxDays} days, so the start date was clamped.` : ''));
     }
 
     const result = await engine.backtest({
@@ -252,18 +192,13 @@ const routes = {
   },
 
   'POST /api/live/start': async (body) => {
-    const { creds, prov, api } = withProvider();
+    const { api } = withProvider();
     if (live.running) throw httpErr(409, 'A live session is already running.');
 
-    // Finnhub's limit is per minute, so it can poll far more often than Alpha Vantage's
-    // 25/day allows. Floor the interval accordingly.
-    const floor = prov.id === 'finnhub' ? 15 : 300;
-    const pollSeconds = Math.max(floor, Number(body.pollSeconds) || (prov.id === 'finnhub' ? 60 : 900));
+    // Yahoo publishes no quota, but it does throttle abusive callers, so 30s is the floor
+    // — fast enough for any timeframe the terminal offers, slow enough to stay welcome.
+    const pollSeconds = Math.max(30, Number(body.pollSeconds) || 60);
     const perHour = Math.ceil(3600 / pollSeconds);
-    const u = api.usage();
-    if (u.label === 'today' && u.remaining < 3) {
-      throw httpErr(429, `Only ${u.remaining} ${prov.label} requests left ${u.label} — not enough to run a live session. Resets ${u.resets}.`);
-    }
 
     const c = {
       symbol: String(body.symbol || '').toUpperCase(),
@@ -274,7 +209,7 @@ const routes = {
     };
     if (!c.symbol || !c.code) throw httpErr(400, 'Symbol and code are required.');
 
-    const { bars } = await api.fetchBars({ symbol: c.symbol, timeframe: c.timeframe, start: c.start, range: c.range, end: '' }, creds.apiKey);
+    const { bars } = await api.fetchBars({ symbol: c.symbol, timeframe: c.timeframe, start: c.start, range: c.range, end: '' });
     if (!bars.length) throw httpErr(422, `No bars returned for ${c.symbol} ${c.timeframe}.`);
 
     live.bars = bars;
@@ -352,19 +287,12 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   const ready = Object.values(engine.probeLanguages()).filter((l) => l.available).map((l) => `${l.label} (${l.version})`);
-  const creds = loadCreds();
+  const prov = activeProvider();
   console.log('');
   console.log('  Strategy Terminal');
   console.log(`  →  http://localhost:${PORT}`);
   console.log(`  runtimes:  ${ready.join(', ') || 'none found'}`);
-  console.log(`  providers: ${providers.list().map((p) => p.label).join(', ')}`);
-  if (creds) {
-    const prov = providers.get(creds.provider);
-    const u = prov.module.usage();
-    console.log(`  active:    ${prov.label} — key loaded, ${u.used}/${u.limit} requests ${u.label}`);
-  } else {
-    console.log(`  active:    none — add a key in the UI (default ${providers.get().label})`);
-  }
+  console.log(`  data:      ${prov.label} — no API key required`);
   console.log('');
 });
 

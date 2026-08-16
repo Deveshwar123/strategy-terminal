@@ -415,13 +415,13 @@ function renderResult(r, bars, opts) {
   if (s.numTrades === 0) {
     warnings.push('Strategy produced no completed round trips. Check your entry conditions, or whether indicators are still in warmup for most of the range.');
   }
-  // Free-tier Alpha Vantage data is not split-adjusted, and an unadjusted split reads
-  // as a real overnight move — worth flagging before you believe the P&L.
+  // Yahoo bars are scaled to adjclose before they reach the engine, so a surviving gap is
+  // real news rather than a corporate action — still worth a human look at ±40%.
   if (r.meta && r.meta.suspectSplits && r.meta.suspectSplits.length) {
     const gaps = r.meta.suspectSplits.map((x) => `${nf(x.ratio, 2)}× on ${fmtTime(x.t, r.timeframe)}`).join(', ');
     warnings.push(r.meta.adjusted
-      ? `Large single-bar gap: ${gaps}. This feed is split-adjusted, so it's more likely a real move, a corporate action, or a thin symbol — but check it before trusting the P&L.`
-      : `Possible unadjusted split: price gapped ${gaps}. This feed is raw, not split-adjusted, so a split looks like a real overnight move and the backtest will book it as P&L.`);
+      ? `Large single-bar gap: ${gaps}. These bars are split-adjusted, so it's more likely a real move, a corporate action, or a thin symbol — but check it before trusting the P&L.`
+      : `Possible unadjusted split: price gapped ${gaps}. This series came back without adjusted closes, so a split looks like a real overnight move and the backtest will book it as P&L.`);
   }
 
   // Max range with more history than the Max-bars cap loses its OLDEST bars — silently
@@ -440,8 +440,7 @@ function renderResult(r, bars, opts) {
       `${c.requested}${c.effectiveFrom ? ` to ${c.effectiveFrom}` : ''}.${c.note ? ' ' + c.note : ''} Use 1Day or longer for deep history.`);
   }
 
-  const PROV_NAMES = { yahoo: 'Yahoo Finance', finnhub: 'Finnhub', alphavantage: 'Alpha Vantage' };
-  const provName = (r.meta && PROV_NAMES[r.meta.provider]) || (r.meta && r.meta.provider) || 'provider';
+  const provName = r.meta && r.meta.provider === 'yahoo' ? 'Yahoo Finance' : (r.meta && r.meta.provider) || 'feed';
   const maxNote = r.meta && r.meta.range === 'max'
     ? ` · Max range${r.meta.inception ? ` — ${esc(r.symbol || '')} first traded ${esc(r.meta.inception.slice(0, 10))}` : ''}`
     : '';
@@ -743,8 +742,8 @@ async function toggleLive() {
   }
   try {
     busy(btn, true, 'Starting…');
-    // Poll cadence depends on the provider: Finnhub's limit is per-minute so it can go
-    // fast; Alpha Vantage's 25/day means minutes, not seconds. Server clamps this too.
+    // Yahoo has no quota to burn, so cadence follows the bar size rather than a budget:
+    // no point polling a daily bar every 30s. The server floors this at 30s regardless.
     await api('/api/live/start', {
       symbol: $('#symbol').value.trim(),
       timeframe: $('#timeframe').value,
@@ -754,9 +753,7 @@ async function toggleLive() {
       config: readConfig(),
       start: $('#start').value,
       range: activeRange(),
-      pollSeconds: state.provider === 'finnhub'
-        ? (/Min/.test($('#timeframe').value) ? 30 : 120)
-        : (/Min/.test($('#timeframe').value) ? 300 : 900),
+      pollSeconds: /Min/.test($('#timeframe').value) ? 30 : 120,
     });
     btn.dataset.label = '■ Stop Live';
     busy(btn, false);
@@ -800,7 +797,7 @@ async function refreshLive() {
       ${st.lastPoll ? '· last ' + new Date(st.lastPoll).toLocaleTimeString() : ''}
       ${st.lastError ? '\n⚠ ' + esc(st.lastError) : ''}
       <br><span style="color:var(--text-muted)">Simulated fills only — no order is ever placed anywhere.
-      Each tick spends one request (~${st.cfg ? st.cfg.perHour : '—'}/hour)${st.usage ? ` against a ${st.usage.limit}-${st.usage.label === 'today' ? 'per-day' : 'per-minute'} limit` : ''}.</span>
+      Each tick spends one request (~${st.cfg ? st.cfg.perHour : '—'}/hour) against a courtesy ${st.usage ? st.usage.limit : 60}/minute ceiling — Yahoo publishes no quota.</span>
     </div>
     <div id="liveBody"></div>`;
 
@@ -824,48 +821,28 @@ function renderUsage(u) {
   $('#usagePill').hidden = false;
   $('#usageText').textContent = `${u.used}/${u.limit} requests ${u.label}`;
   $('#usagePill').title = `Resets: ${u.resets}. Cached data costs nothing.`;
-  // A per-minute budget refilling on its own isn't worth alarming about; a daily one is.
-  const tight = u.label === 'today' ? 5 : 10;
-  $('#usageDot').className = 'dot ' + (u.remaining <= 0 ? 'off' : u.remaining <= tight ? 'warn' : 'on');
+  // A per-minute window refills on its own, so this is a throttling hint, not a budget.
+  $('#usageDot').className = 'dot ' + (u.remaining <= 0 ? 'off' : u.remaining <= 10 ? 'warn' : 'on');
 }
 
-function renderProviderPicker(list, selected) {
+function renderFeedInfo(list) {
   if (!list || !list.length) return;
   state.providers = list;
-  const sel = $('#provider');
-  if (sel.options.length !== list.length) {
-    sel.innerHTML = list.map((p) => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join('');
-  }
-  sel.value = selected || sel.value || list[0].id;
-  const p = list.find((x) => x.id === sel.value) || list[0];
-  // A keyless provider has no field to fill and no key page to visit — hide both rather
-  // than showing an input that does nothing.
-  $('#apiKey').placeholder = p.keyPlaceholder || '';
-  $('#apiKey').disabled = !!p.keyless;
-  $('#apiKey').hidden = !!p.keyless;
-  $('#keyLink').innerHTML = p.keyless ? '' : `— <a href="${esc(p.keyUrl)}" target="_blank" rel="noreferrer">get one</a>`;
-  $('#btnConnect').textContent = p.keyless ? 'Use Yahoo (no key)' : 'Connect';
-  $('#provLimit').textContent = p.limitNote || '';
-  $('#provWarn').innerHTML = p.warning ? esc(p.warning) : '';
-  $('#provWarn').hidden = !p.warning;
+  const p = list[0];
+  $('#feedLimit').textContent = p.limitNote || '';
+  $('#feedWarn').innerHTML = p.warning ? esc(p.warning) : '';
+  $('#feedWarn').hidden = !p.warning;
 }
 
+// There is no key and no account, so the only thing status can be wrong about is whether
+// the server is up — "connected" is otherwise a given.
 async function refreshStatus() {
   try {
     const st = await api('/api/status');
-    const dot = $('#connDot'), txt = $('#connText');
-    if (st.connected) {
-      dot.className = 'dot on';
-      txt.textContent = `${st.providerLabel} · ${st.keyPreview}`;
-      state.provider = st.provider;
-    } else {
-      dot.className = 'dot off';
-      txt.textContent = 'no API key';
-      // Only nag when a key is genuinely required; the default provider needs none.
-      const dflt = (st.providers || []).find((p) => p.id === st.default);
-      if (!dflt || !dflt.keyless) $('#keysModal').classList.add('open');
-    }
-    renderProviderPicker(st.providers, st.provider || st.default);
+    $('#connDot').className = 'dot on';
+    $('#connText').textContent = `${st.providerLabel} · no key needed`;
+    state.provider = st.provider;
+    renderFeedInfo(st.providers);
     renderUsage(st.usage);
   } catch {
     $('#connDot').className = 'dot off';
@@ -902,8 +879,8 @@ function showTab(name) {
 $$('.tab').forEach((t) => t.addEventListener('click', () => showTab(t.dataset.tab)));
 
 const modal = (id, open) => $(id).classList.toggle('open', open);
-$('#btnKeys').onclick = () => modal('#keysModal', true);
-$('#btnKeysClose').onclick = () => modal('#keysModal', false);
+$('#btnCheck').onclick = () => modal('#feedModal', true);
+$('#btnFeedClose').onclick = () => modal('#feedModal', false);
 $('#btnSettings').onclick = () => modal('#settingsModal', true);
 $('#btnSettingsClose').onclick = () => modal('#settingsModal', false);
 $('#btnApiRef').onclick = () => { $('#apiRefBody').textContent = API_REF; modal('#apiModal', true); };
@@ -912,23 +889,19 @@ $('#btnSaveClose').onclick = () => modal('#saveModal', false);
 $('#btnLoadClose').onclick = () => modal('#loadModal', false);
 $$('.modal-back').forEach((m) => m.addEventListener('click', (e) => { if (e.target === m) m.classList.remove('open'); }));
 
-$('#provider').addEventListener('change', () => renderProviderPicker(state.providers, $('#provider').value));
-
-$('#btnConnect').onclick = async () => {
-  const msg = $('#keysMsg');
-  const provId = $('#provider').value;
-  const prov = state.providers.find((p) => p.id === provId);
-  msg.innerHTML = `<div class="banner info">Verifying with ${esc(prov ? prov.label : provId)}…</div>`;
+// Nothing to configure, so the only useful button is "is the feed actually answering me
+// right now" — which is worth one real request rather than a claim.
+$('#btnFeedCheck').onclick = async () => {
+  const msg = $('#feedMsg');
+  msg.innerHTML = '<div class="banner info">Asking Yahoo for one bar of AAPL…</div>';
   try {
-    const r = await api('/api/connect', { provider: provId, apiKey: $('#apiKey').value });
-    msg.innerHTML = `<div class="banner info">Connected to ${esc(r.providerLabel)}. ${r.keyless ? 'No key needed.' : 'Key saved locally.'} Test quote: ${esc(r.quote.symbol)} @ ${nf(r.quote.price)}.</div>`;
+    const r = await api('/api/check', {});
+    msg.innerHTML = `<div class="banner info">${esc(r.providerLabel)} answered: ${esc(r.quote.symbol)} @ ${nf(r.quote.price)} (${esc(r.quote.tradingDay)}).</div>`;
     await refreshStatus();
-    setTimeout(() => modal('#keysModal', false), 1200);
   } catch (e) {
     msg.innerHTML = `<div class="banner error">${esc(e.message)}</div>`;
   }
 };
-$('#btnDisconnect').onclick = async () => { await api('/api/disconnect', {}); $('#keysMsg').innerHTML = ''; $('#apiKey').value = ''; refreshStatus(); };
 
 $('#btnTemplate').onclick = () => {
   const lang = $('#language').value;

@@ -4,6 +4,43 @@ Tickets opened and closed against Strategy Terminal. Newest first.
 
 ---
 
+## ST-10 — Removed Finnhub, Alpha Vantage and the whole API-key mechanism · DONE 2026-08-16
+
+**Not a defect — a deliberate change**, logged here because ST-5 and ST-8 reference these
+providers and this closes that thread.
+
+**Decision.** Yahoo Finance is the only data feed, permanently and by default. Everything
+that existed to support *choosing* a feed or *authenticating* to one is gone.
+
+**Why.** Neither alternative could actually run a backtest on a free tier: Finnhub
+paywalled `/stock/candle` **and** `/crypto/candle` (ST-5), and Alpha Vantage allows 25
+requests/day with unadjusted free daily bars. Every real run for the past week went through
+Yahoo. The key machinery was carrying weight for two providers nobody could use.
+
+**Removed.** `providers/finnhub.js`, `providers/alphavantage.js`; `.credentials.json`
+read/write, `requireCreds`, the 401 credential gate, `POST /api/connect`,
+`POST /api/disconnect`, `verifyKey`, the `keyless` flag, the API Keys dialog, the provider
+picker, and the Alpha-Vantage daily-quota logic in live mode.
+
+**Kept, deliberately.** `providers/index.js` is still a registry rather than a bare
+`require('./yahoo')` — it is the seam that let this project move Alpaca → Alpha Vantage →
+Finnhub → Yahoo without the engine or runners ever changing. A future feed is one module
+plus one entry. Also kept: `.credentials*` in `.gitignore`, so an old key sitting on disk
+can never be committed by accident (see ST-6).
+
+**Replaced with.** `POST /api/check` and a **Test feed** button — one real request for one
+AAPL bar, answering "is it me or is it Yahoo" without pretending to verify anything.
+
+**Left on disk, not deleted.** `.credentials.json` and `.credentials.finnhub.bak.json` are
+no longer read by anything. Deleting them is the user's call; one holds a real (now
+useless) Finnhub key.
+
+**Verification.** `selftest.js` 31/31. Live start/poll/stop works with no credentials
+present. SPY Max still returns 8,443 bars from 1993-01-29 with 16 trades — unchanged from
+before the removal, which is the point: nothing about the data path moved.
+
+---
+
 ## ST-9 — One backtick broke the entire UI; "terminal not getting data" · CLOSED 2026-08-16
 
 **Symptom.** Reported as the terminal no longer fetching data. It was worse than that:

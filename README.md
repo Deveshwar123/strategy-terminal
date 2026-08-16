@@ -1,11 +1,11 @@
 # Strategy Terminal
 
 A local terminal for testing trading strategies. Paste a strategy in **Python,
-JavaScript, or Ruby**, pick the language from a dropdown, pick the data provider from
-another, and run it over historical bars — or forward-test it on live bars with
-simulated fills.
+JavaScript, or Ruby**, pick the language from a dropdown, and run it over historical bars
+— or forward-test it on live bars with simulated fills.
 
-Zero npm dependencies. Nothing leaves your machine except the calls to your data provider.
+Zero npm dependencies, and **no API key to get**: data comes from Yahoo Finance, which is
+public. Nothing leaves your machine except those price requests.
 
 ```bash
 node server.js          # → http://localhost:4477
@@ -15,9 +15,7 @@ node selftest.js        # runs the same strategy through every runtime and check
 ## How it works
 
 ```
-browser UI  ──▶  server.js  ──▶  providers/yahoo.js         ─┐
-                    │            providers/finnhub.js        ├─ pick one in the UI
-                    │            providers/alphavantage.js  ─┘
+browser UI  ──▶  server.js  ──▶  providers/yahoo.js   ─ no key, no quota
                     │                  └─ disk cache + usage counter
                     ├──▶  runners/python.py    ─┐
                     ├──▶  runners/javascript.js ├─ your code, in a subprocess
@@ -26,44 +24,55 @@ browser UI  ──▶  server.js  ──▶  providers/yahoo.js         ─┐
                     └──▶  engine.js  — fills, portfolio accounting, statistics
 ```
 
-Two pluggable axes, same idea both times: **languages** in `runners/`, **data providers**
-in `providers/`. Neither knows the other exists, and `engine.js` knows about neither.
+Two pluggable axes, same idea both times: **languages** in `runners/`, **data feeds** in
+`providers/`. Neither knows the other exists, and `engine.js` knows about neither.
 
 The split matters: **a runner only turns bars into orders.** Every dollar of the
 simulation — fill prices, slippage, commissions, position accounting, equity, stats —
 happens in `engine.js`. That's why the same strategy gives byte-identical results in
 all three languages, and why adding a language can't quietly change your numbers.
 
-Each provider is isolated behind four functions (`fetchBars`, `verifyKey`, `latestQuote`,
-`usage`), registered in `providers/index.js`. Swapping providers doesn't touch the engine
-or the runners — this project has now moved Alpaca → Alpha Vantage → Finnhub → Yahoo, and
-all 20 self-test checks kept passing untouched each time.
+The provider is isolated behind three functions (`fetchBars`, `latestQuote`, `usage`),
+registered in `providers/index.js`. That seam is why swapping feeds never touched the
+engine or the runners — this project moved Alpaca → Alpha Vantage → Finnhub → Yahoo and
+the self-test kept passing untouched each time, and it's why settling on Yahoo permanently
+still left the registry in place rather than hardcoding a require.
 
-A provider marked `keyless: true` in the registry skips the credential gate in
-`server.js`; nothing else about the contract changes.
+The browser can't reliably call Yahoo's endpoint directly (CORS), so the fetching lives in
+the local server, which binds to `127.0.0.1` only.
 
-The browser can't reliably call a data API directly, and a key in a static HTML file is
-a key sitting in plaintext — hence the local server. It binds to `127.0.0.1` only.
+## Data: Yahoo Finance, and nothing to configure
 
-## Providers
+**There is no API key anywhere in this app, and no way to add one.** Yahoo's v8 chart
+endpoint is public, so there is no account, no quota, no key file and no connect step —
+the terminal just works when you start it.
 
-| | key? | free limit | catch |
-|---|---|---|---|
-| **Yahoo Finance** (default) | **none** | no published quota | Intraday history is capped hard: ~30d of 1Min, 60d of 5–30Min, 730d of 1Hour. Undocumented public endpoint. |
-| **Finnhub** | required | 60 req/**minute** | **Candles are PAID.** Free keys get 403 on `/stock/candle` *and* `/crypto/candle` — verified 2026-08-15. Unusable for backtesting on a free key. |
-| **Alpha Vantage** | required | 25 req/**day** | Free daily bars are not split-adjusted. |
+It returns 40+ years of split-adjusted daily bars: 8,443 for `SPY` back to 1993-01-29,
+16,263 for `KO` back to 1962, 24,772 for `^GSPC` back to 1927. Symbols are Yahoo-style —
+bare tickers for US equities (`AAPL`, `SPY`), `^GSPC` for indices, `BTC-USD` for crypto,
+`EURUSD=X` for forex.
 
-Switch in the **API Keys** dialog. Yahoo needs no key, so the dialog hides the key field
-and the button reads **Use Yahoo (no key)**.
+The one real limit is intraday depth, and it can't be worked around: **8 days per request
+for 1Min**, 60 days of 5–30Min, 730 days of 1Hour. Deep history means `1Day` or longer.
 
-**Yahoo is the default because it's the only one that works out of the box.** It returns
-40+ years of split-adjusted daily bars — 8,443 for `SPY` back to 1993-01-29, 10,485 for
-`AAPL` back to 1985. Symbols are Yahoo-style: bare tickers for US equities (`AAPL`,
-`SPY`), `^GSPC` for indices, `BTC-USD` for crypto, `EURUSD=X` for forex.
+**Test feed** in the header spends one request on a single AAPL bar, for when the question
+is "is it me or is it Yahoo".
 
-**If Finnhub 403s you, that's the paywall, not a bug.** It used to be that crypto candles
-stayed free and the README told you to fall back to `BINANCE:BTCUSDT`; Finnhub has since
-paywalled those too, so that escape hatch is gone (see ST-5 in `BUGS.md`). Use Yahoo.
+<details>
+<summary>Why the other two providers were removed</summary>
+
+Finnhub and Alpha Vantage were both supported until 2026-08-16 and are gone along with the
+entire key mechanism (ST-10). Neither could do the job:
+
+- **Finnhub** paywalled historical candles — free keys get 403 on `/stock/candle` *and*
+  `/crypto/candle` (verified 2026-08-15, ST-5). Unusable for backtesting without paying.
+- **Alpha Vantage** allows 25 requests/day, and its free daily bars are **not
+  split-adjusted**, so every split reads as a real overnight crash.
+
+Their modules are in git history at commit `e1facd9` if a paid plan ever makes one worth
+reviving, and `providers/index.js` is still a registry — a new feed is one module plus one
+entry, with nothing else to change.
+</details>
 
 ### Picking a date range
 
@@ -103,32 +112,23 @@ Both are handled in `providers/yahoo.js`, and both are worth knowing if you ever
   engine and every split books as a real overnight crash. The provider scales each bar's
   open/high/low/close by `adjclose/close` before returning it.
 
-### Both providers cache
+### Everything is cached
 
 Every response is cached to `data/`; re-running a backtest over a range you've already
-pulled costs **zero** requests, and the results header tells you which happened. The
-header pill shows usage against whichever limit applies. Specifically for Alpha Vantage's
-much tighter budget:
+pulled costs **zero** requests, and the results header tells you which happened. Yahoo
+publishes no quota, so the header pill tracks a self-imposed 60/minute courtesy ceiling
+purely so runaway polling is visible.
 
-- **Daily/weekly/monthly** history comes back in one request going back 20+ years.
-  Prefer these.
-- **Intraday** (`1Min`–`1Hour`) returns ~30 days in one request. Older intraday needs
-  one request *per calendar month*, so the server refuses ranges that would cost more
-  than ~6 requests rather than silently draining your quota.
-- **Live mode** spends one request per tick. On Alpha Vantage it polls every 5–15
-  minutes and stops itself when the quota runs out; on Finnhub it can poll every 30s.
+Deep history is one request: daily/weekly/monthly come back 40+ years in a single call.
+Live mode spends one request per tick, and a Max-range session fetches its full history
+once at start and then polls only a recent window.
 
-### Watch for unadjusted splits
+### Single-bar gaps are still flagged
 
-This applies to **Alpha Vantage only** — Yahoo bars are adjusted before they reach the
-engine, so the problem below can't arise there.
-
-Alpha Vantage's `TIME_SERIES_DAILY_ADJUSTED` is premium, so its free daily bars come back
-raw. A 2:1 split looks like a 50% overnight crash, and a backtest will happily book it as
-a real loss. The terminal scans for single-bar gaps beyond ±40% and warns above the
-results (wording adapts to whether the feed is adjusted). **Take that warning seriously**
-— it's the difference between a strategy that works and one that "made 200%" off a
-reverse split.
+Yahoo bars are scaled to `adjclose` before they reach the engine, so a split can't book as
+P&L. The ±40% single-bar gap warning stays anyway — with adjustment handled, a surviving
+gap means real news, a corporate action, or a thin symbol, all of which are worth a look
+before you believe the numbers.
 
 ## Writing a strategy
 
@@ -226,23 +226,27 @@ at 0 bps isn't a strategy.
 
 ## Live mode
 
-**Go Live** warms up on history, then polls your provider for new bars and re-runs your
-strategy forward. Fills are **simulated** — no order is placed anywhere. The live
-portion of the run is shaded on the charts.
+**Go Live** warms up on history, then polls Yahoo for new bars and re-runs your strategy
+forward. Fills are **simulated** — no order is placed anywhere. The live portion of the
+run is shaded on the charts.
 
-Cadence follows the provider's limit shape: Finnhub's per-minute budget allows a 30s
-poll, while Alpha Vantage's 25/day forces 5–15 minutes and the session stops itself
-when the quota runs out rather than failing silently.
+Cadence follows the bar size rather than a budget: 30s on intraday timeframes, 120s on
+daily and up, floored at 30s server-side. There is no quota to exhaust, so a session runs
+until you stop it.
 
 ## Adding a provider
 
-Write `providers/<name>.js` exporting `fetchBars({symbol, timeframe, start, end, limit,
-force, range}, apiKey) -> {bars, meta}`, plus `verifyKey`, `latestQuote`, `usage`, and
-`TIMEFRAMES`. Register it in `providers/index.js`. Nothing else changes.
+Yahoo is permanent, but the seam is still there. Write `providers/<name>.js` exporting
+`fetchBars({symbol, timeframe, start, end, limit, force, range}) -> {bars, meta}`, plus
+`latestQuote`, `usage`, and `TIMEFRAMES`. Register it in `providers/index.js`. Nothing
+else changes.
+
+There is deliberately no credential plumbing left, so a feed needing a key means adding
+that back — see `e1facd9` for how it looked.
 
 `range: 'max'` overrides `start` and means "from inception". Resolve it however your feed
-allows — Yahoo reads `meta.firstTradeDate`, the other two just ask for everything the
-endpoint holds — and report what you resolved in `meta.inception` / `meta.requestedFrom`.
+allows — Yahoo reads `meta.firstTradeDate` — and report what you resolved in
+`meta.inception` / `meta.requestedFrom`.
 If `limit` clips bars, say so in `meta.truncated`; the UI turns that into a warning.
 
 ## Adding a language
@@ -259,7 +263,8 @@ Use `runners/python.py` as the reference; it's pure stdlib and the easiest to po
 
 - Timeframes: `1Min 5Min 15Min 30Min 1Hour 1Day 1Week 1Month`. Ranges: `1m 3m 6m YTD 1y 2y
   5y 10y 20y Max Custom`.
-- `.credentials.json` holds your API key and the chosen provider at chmod 600, gitignored.
+- No credentials file, no API key, nothing to configure. `.gitignore` still covers
+  `.credentials*` so an old key left on disk can never be committed.
 - `data/` (cached bars + the usage counter) is gitignored too — delete it any time to
   force fresh fetches, at the cost of requests.
 - Backtest results are not predictions. Optimising params until the curve looks good is

@@ -1,10 +1,10 @@
 'use strict';
-// Yahoo Finance data provider.
+// Yahoo Finance data provider — the only one, and permanently the default.
 //
-// The only provider here that needs no API key: the v8 chart endpoint is public.
-// That makes it the default for backtesting, because the other two both gate the
-// thing a backtest actually needs — Finnhub paywalled /stock/candle AND /crypto/candle,
-// and Alpha Vantage allows 25 requests/day.
+// The v8 chart endpoint is public, so there is no API key anywhere in this app. That is
+// why the alternatives were dropped: Finnhub paywalled /stock/candle AND /crypto/candle,
+// and Alpha Vantage allows 25 requests/day with unadjusted free daily bars. Both gated
+// the one thing a backtest actually needs.
 //
 // Two things about this endpoint are easy to get wrong, and both silently corrupt a
 // backtest rather than erroring:
@@ -246,7 +246,7 @@ function epochOf(dateStr, endOfDay) {
   return Math.floor(new Date(dateStr + (endOfDay ? 'T23:59:59Z' : 'T00:00:00Z')).getTime() / 1000);
 }
 
-async function fetchBars({ symbol, timeframe, start, end, limit, force, range }, _apiKey) {
+async function fetchBars({ symbol, timeframe, start, end, limit, force, range }) {
   const tf = TIMEFRAMES[timeframe];
   if (!tf) throw new Error(`Unsupported timeframe "${timeframe}". Yahoo supports: ${Object.keys(TIMEFRAMES).join(', ')}`);
 
@@ -341,18 +341,18 @@ async function fetchBars({ symbol, timeframe, start, end, limit, force, range },
   };
 }
 
-// No key to verify. Still hits the network, so "Connect" proves the endpoint is
-// reachable from this machine rather than just claiming success.
-async function verifyKey(_apiKey) {
+// There is no key to verify, but the endpoint can still be unreachable — so the header
+// pill checks it for real rather than assuming, one bar of AAPL.
+async function checkReachable() {
   const json = await get('AAPL', { range: '5d', interval: '1d' });
   record('AAPL (reachability check)');
   const { bars } = parseChart(json);
   if (!bars.length) throw new Error('Yahoo reachable but returned no bars for AAPL — try again shortly.');
   const last = bars[bars.length - 1];
-  return { symbol: 'AAPL', price: last.c, tradingDay: last.t.slice(0, 10), keyless: true };
+  return { symbol: 'AAPL', price: last.c, tradingDay: last.t.slice(0, 10) };
 }
 
-async function latestQuote(symbol, _apiKey) {
+async function latestQuote(symbol) {
   const sym = String(symbol).toUpperCase();
   const json = await get(sym, { range: '5d', interval: '1d' });
   record(`${sym} quote`);
@@ -371,4 +371,4 @@ async function latestQuote(symbol, _apiKey) {
   };
 }
 
-module.exports = { fetchBars, verifyKey, latestQuote, usage, TIMEFRAMES, parseChart };
+module.exports = { fetchBars, checkReachable, latestQuote, usage, TIMEFRAMES, parseChart };

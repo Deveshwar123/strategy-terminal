@@ -16,7 +16,7 @@
     <span class="pill" id="usagePill" hidden title="Provider request usage. Cached data is free."><span class="dot" id="usageDot"></span><span id="usageText"></span></span>
     <div class="spacer"></div>
     <span class="pill" id="langPill" title="Detected runtimes"></span>
-    <button class="ghost" id="btnKeys">API Keys</button>
+    <button class="ghost" id="btnCheck" title="Spend one request to confirm the feed answers from this machine">Test feed</button>
   </header>
 
   <div class="runbar">
@@ -96,21 +96,18 @@
 
 <div class="tooltip" id="tip"></div>
 
-<!-- API keys -->
-<div class="modal-back" id="keysModal">
+<!-- Data feed -->
+<div class="modal-back" id="feedModal">
   <div class="modal">
-    <h2>Data provider</h2>
-    <p>Stored in <code>.credentials.json</code> next to the server (chmod 600), never sent anywhere but the provider you pick. Connecting spends one request to verify the key.</p>
-    <label class="field"><span>Provider</span><select id="provider"></select></label>
-    <label class="field" style="margin-top:10px"><span>API Key <span id="keyLink"></span></span><input id="apiKey" spellcheck="false"></label>
-    <div class="banner info" id="provLimit" style="margin-top:12px"></div>
-    <div class="banner warn" id="provWarn"></div>
-    <div id="keysMsg"></div>
+    <h2>Data feed</h2>
+    <p><b>Yahoo Finance</b>, permanently. No API key, no account, no quota — nothing to configure, which is why there is no settings form here.</p>
+    <div class="banner info" id="feedLimit"></div>
+    <div class="banner warn" id="feedWarn"></div>
+    <div id="feedMsg"></div>
     <div class="row">
-      <button class="primary" id="btnConnect">Connect</button>
-      <button id="btnDisconnect" class="danger">Forget keys</button>
+      <button class="primary" id="btnFeedCheck">Test feed</button>
       <div class="spacer"></div>
-      <button id="btnKeysClose" class="ghost">Close</button>
+      <button id="btnFeedClose" class="ghost">Close</button>
     </div>
   </div>
 </div>
