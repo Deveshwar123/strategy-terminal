@@ -27,8 +27,24 @@
         <option>1Hour</option><option selected>1Day</option><option>1Week</option><option>1Month</option>
       </select>
     </label>
-    <label class="field"><span>Start</span><input type="date" id="start"></label>
-    <label class="field"><span>End</span><input type="date" id="end"></label>
+    <label class="field"><span>Range</span>
+      <select id="range" title="Max pulls every bar since the symbol started trading">
+        <option value="1m">1 month</option>
+        <option value="3m">3 months</option>
+        <option value="6m">6 months</option>
+        <option value="ytd">YTD</option>
+        <option value="1y">1 year</option>
+        <option value="2y" selected>2 years</option>
+        <option value="5y">5 years</option>
+        <option value="10y">10 years</option>
+        <option value="20y">20 years</option>
+        <option value="max">Max (since inception)</option>
+        <option value="custom">Custom…</option>
+      </select>
+    </label>
+    <label class="field" id="fieldStart"><span>Start</span><input type="date" id="start"></label>
+    <label class="field" id="fieldEnd"><span>End</span><input type="date" id="end"></label>
+    <span class="hint" id="rangeHint" hidden></span>
     <label class="field"><span>Language</span><select id="language"></select></label>
     <button id="btnSettings" class="ghost" title="Cash, fills, costs">⚙ Settings</button>
     <div class="spacer"></div>

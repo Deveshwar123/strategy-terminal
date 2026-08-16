@@ -4,6 +4,44 @@ Tickets opened and closed against Strategy Terminal. Newest first.
 
 ---
 
+## ST-8 — 1Min timeframe errored on any start date older than 8 days · CLOSED 2026-08-16
+
+**Symptom.** Found while testing the new Max range against every timeframe: `1Min` threw
+`Only 8 days worth of 1m granularity data are allowed to be fetched per request` instead of
+returning bars. Reproducible without Max — any 1Min run with a start date more than ~8 days
+back failed the same way, so this predates today's work.
+
+**Root cause.** `TIMEFRAMES['1Min'].maxDays` was set to `30`, conflating two different Yahoo
+limits: it *stores* ~30 days of 1-minute bars but *serves* at most 8 days per request. The
+clamp therefore "fixed" the start date to a value the endpoint still refuses.
+
+**Fix.** `maxDays: 7` for 1Min, with a `note` field explaining the stored-vs-served
+distinction; the note is surfaced in the results warning so the cap does not read as
+arbitrary. Chunking multiple requests to reach the full 30 days was deliberately not built —
+it is a different feature, not a bug fix.
+
+**Verification.** `1Min` Max now returns 1,951 bars over the last 7 days. 5Min (3,121),
+1Hour (3,484), 1Week (2,385), 1Month (501) all return bars. `selftest.js` 20/20.
+
+---
+
+## ST-7 — Intraday clamp landed exactly on Yahoo's boundary and was rejected · CLOSED 2026-08-16
+
+**Symptom.** `5Min` with a start date older than the 60-day cap returned
+`5m data not available for startTime=… The requested range must be within the last 60 days`
+rather than the clamped range the code intended to request.
+
+**Root cause.** The clamp computed `now - maxDays*86400` — precisely Yahoo's boundary. By the
+time the request was served, that instant was marginally outside the window, and the endpoint
+rejects an out-of-range request outright instead of trimming it. The clamp existed exactly to
+prevent this error and was landing one second inside the failure.
+
+**Fix.** Clamp to `now - maxDays*86400 + 6h` in `providers/yahoo.js`. Costs at most one
+partial session at the far edge; the alternative is a hard error. `clamped.effectiveFrom` now
+reports where the window actually starts, not just what was asked for.
+
+---
+
 ## ST-6 — `.gitignore` would not have caught a credentials backup · CLOSED 2026-08-15
 
 **Symptom.** Found while making a backup of `.credentials.json` before switching

@@ -409,10 +409,29 @@ function renderResult(r, bars, opts) {
       : `Possible unadjusted split: price gapped ${gaps}. This feed is raw, not split-adjusted, so a split looks like a real overnight move and the backtest will book it as P&L.`);
   }
 
+  // Max range with more history than the Max-bars cap loses its OLDEST bars — silently
+  // turning "since inception" into "since whenever the cap happened to land".
+  if (r.meta && r.meta.truncated) {
+    const t = r.meta.truncated;
+    warnings.push(
+      `Only the newest ${t.limit.toLocaleString()} of ${t.availableBars.toLocaleString()} bars were tested — history before ` +
+      `${fmtTime(t.keptFrom, r.timeframe)} was dropped by the Max bars cap (Settings), including ${fmtTime(t.droppedFrom, r.timeframe)}. ` +
+      `Raise Max bars to test the full range.`);
+  }
+  if (r.meta && r.meta.clamped) {
+    const c = r.meta.clamped;
+    warnings.push(
+      `${r.timeframe} history is capped at ${c.maxDays} days by the feed, so the start was clamped forward from ` +
+      `${c.requested}${c.effectiveFrom ? ` to ${c.effectiveFrom}` : ''}.${c.note ? ' ' + c.note : ''} Use 1Day or longer for deep history.`);
+  }
+
   const PROV_NAMES = { yahoo: 'Yahoo Finance', finnhub: 'Finnhub', alphavantage: 'Alpha Vantage' };
   const provName = (r.meta && PROV_NAMES[r.meta.provider]) || (r.meta && r.meta.provider) || 'provider';
+  const maxNote = r.meta && r.meta.range === 'max'
+    ? ` · Max range${r.meta.inception ? ` — ${esc(r.symbol || '')} first traded ${esc(r.meta.inception.slice(0, 10))}` : ''}`
+    : '';
   const src = r.meta
-    ? `<div class="banner info">Data: ${esc(provName)}${r.meta.assetClass ? ` (${esc(r.meta.assetClass)})` : ''} · ${r.meta.cached ? `served from local cache (fetched ${new Date(r.meta.fetchedAt).toLocaleString()}) — 0 requests spent` : `${r.meta.apiCalls} request${r.meta.apiCalls === 1 ? '' : 's'} spent`}${r.usage ? ` · ${r.usage.used}/${r.usage.limit} ${esc(r.usage.label)}` : ''}</div>`
+    ? `<div class="banner info">Data: ${esc(provName)}${r.meta.assetClass ? ` (${esc(r.meta.assetClass)})` : ''} · ${r.meta.cached ? `served from local cache (fetched ${new Date(r.meta.fetchedAt).toLocaleString()}) — 0 requests spent` : `${r.meta.apiCalls} request${r.meta.apiCalls === 1 ? '' : 's'} spent`}${r.usage ? ` · ${r.usage.used}/${r.usage.limit} ${esc(r.usage.label)}` : ''}${maxNote}</div>`
     : '';
 
   host.innerHTML = `
@@ -540,6 +559,92 @@ function renderConsole(r) {
   $('#logCount').textContent = (r.logs || []).length || '';
 }
 
+// ------------------------------------------------------------- range selector
+
+// Every preset resolves to explicit start/end dates in the browser, so the request the
+// server sees is the same shape it has always been. "max" is the one exception: only the
+// data provider knows when a symbol started trading, so it travels as range:'max' and
+// comes back resolved in meta.inception.
+const RANGES = {
+  '1m': { label: '1 month', days: 30 },
+  '3m': { label: '3 months', days: 91 },
+  '6m': { label: '6 months', days: 182 },
+  ytd: { label: 'YTD', ytd: true },
+  '1y': { label: '1 year', days: 365 },
+  '2y': { label: '2 years', days: 730 },
+  '5y': { label: '5 years', days: 1826 },
+  '10y': { label: '10 years', days: 3653 },
+  '20y': { label: '20 years', days: 7305 },
+  max: { label: 'Max', max: true },
+  custom: { label: 'Custom', custom: true },
+};
+
+const iso = (d) => d.toISOString().slice(0, 10);
+
+// Intraday history is capped server-side by every provider, so a long range on a 5Min
+// timeframe silently becomes a short one. Say so before the run rather than after.
+const INTRADAY_CAP_DAYS = { '1Min': 7, '5Min': 60, '15Min': 60, '30Min': 60, '1Hour': 730 };
+
+function applyRange() {
+  const key = $('#range').value;
+  const spec = RANGES[key] || RANGES.custom;
+  const today = new Date();
+
+  if (!spec.custom) {
+    $('#end').value = iso(today);
+    if (spec.max) $('#start').value = '';
+    else if (spec.ytd) $('#start').value = iso(new Date(Date.UTC(today.getUTCFullYear(), 0, 1)));
+    else $('#start').value = iso(new Date(today.getTime() - spec.days * 86400e3));
+  } else {
+    // Coming from Max the Start box is empty; hand over an editable window rather than a
+    // blank one that would quietly fall back to the provider's own default lookback.
+    if (!$('#start').value) $('#start').value = iso(new Date(today.getTime() - 730 * 86400e3));
+    if (!$('#end').value) $('#end').value = iso(today);
+  }
+
+  // Preset dates stay visible — you should be able to read the exact window that will
+  // run — but only Custom lets you edit them.
+  $('#start').disabled = !spec.custom;
+  $('#end').disabled = !spec.custom;
+  $('#fieldStart').style.opacity = spec.max ? '.45' : '1';
+
+  updateRangeHint();
+}
+
+function updateRangeHint() {
+  const key = $('#range').value;
+  const spec = RANGES[key] || RANGES.custom;
+  const hint = $('#rangeHint');
+  const tf = $('#timeframe').value;
+  const cap = INTRADAY_CAP_DAYS[tf];
+  const notes = [];
+
+  if (spec.max) {
+    const inception = state.result && state.result.meta && state.result.meta.inception;
+    notes.push(inception && state.result.symbol === $('#symbol').value.trim().toUpperCase()
+      ? `since ${inception.slice(0, 10)} (first trade)`
+      : 'since the first traded bar');
+  }
+  // Only warn when the requested span actually exceeds the cap.
+  if (cap) {
+    const startMs = $('#start').value ? new Date($('#start').value).getTime() : null;
+    const spanDays = spec.max || startMs == null ? Infinity : (Date.now() - startMs) / 86400e3;
+    if (spanDays > cap) notes.push(`${tf} history is capped at ${cap} days — start will be clamped`);
+  }
+
+  hint.textContent = notes.join(' · ');
+  hint.hidden = !notes.length;
+}
+
+// What the server needs: 'max' resolves provider-side, everything else is already dates.
+const activeRange = () => ($('#range').value === 'max' ? 'max' : '');
+
+function setRange(key) {
+  if (!key || !RANGES[key]) return;
+  $('#range').value = key;
+  applyRange();
+}
+
 // ------------------------------------------------------------------ actions
 
 function readConfig() {
@@ -579,6 +684,7 @@ async function runBacktest() {
       timeframe: $('#timeframe').value,
       start: $('#start').value,
       end: $('#end').value,
+      range: activeRange(),
       params,
       config: readConfig(),
       maxBars: Number($('#maxBars').value) || 20000,
@@ -600,6 +706,7 @@ async function runBacktest() {
     renderResult(res, res.bars);
     renderTrades(res);
     renderConsole(res);
+    updateRangeHint(); // a Max run now knows the real inception date — show it
   } catch (e) {
     $('#resultsBody').innerHTML = `<div class="banner error">${esc(e.message)}</div>`;
   } finally {
@@ -631,6 +738,7 @@ async function toggleLive() {
       params: readParams(),
       config: readConfig(),
       start: $('#start').value,
+      range: activeRange(),
       pollSeconds: state.provider === 'finnhub'
         ? (/Min/.test($('#timeframe').value) ? 30 : 120)
         : (/Min/.test($('#timeframe').value) ? 300 : 900),
@@ -821,6 +929,7 @@ $('#btnSaveConfirm').onclick = async () => {
   await api('/api/strategies', {
     name, language: $('#language').value, code: codeEl.value,
     params: $('#params').value, symbol: $('#symbol').value, timeframe: $('#timeframe').value,
+    range: $('#range').value, start: $('#start').value, end: $('#end').value,
     config: readConfig(),
   });
   modal('#saveModal', false);
@@ -847,6 +956,14 @@ $('#stratList').addEventListener('click', async (e) => {
     if (s.params) $('#params').value = typeof s.params === 'string' ? s.params : JSON.stringify(s.params);
     if (s.symbol) $('#symbol').value = s.symbol;
     if (s.timeframe) $('#timeframe').value = s.timeframe;
+    // Older saves predate the range selector; they carry dates only, which is Custom.
+    if (s.range) {
+      if (s.range === 'custom') { $('#start').value = s.start || ''; $('#end').value = s.end || ''; }
+      setRange(s.range);
+    } else if (s.start || s.end) {
+      $('#start').value = s.start || ''; $('#end').value = s.end || '';
+      setRange('custom');
+    }
     syncGutter(); updateEntryHint();
     modal('#loadModal', false);
   }
@@ -859,6 +976,14 @@ $('#language').addEventListener('change', () => {
   const isTemplate = Object.values(TEMPLATES).some((t) => t.trim() === cur);
   if (!cur || isTemplate) { codeEl.value = TEMPLATES[$('#language').value] || ''; syncGutter(); }
 });
+
+$('#range').addEventListener('change', applyRange);
+$('#timeframe').addEventListener('change', updateRangeHint);
+$('#symbol').addEventListener('input', updateRangeHint);
+// Typing a date is itself the request for a custom window — no need to pick Custom first.
+for (const id of ['#start', '#end']) {
+  $(id).addEventListener('change', () => { if ($('#range').value !== 'custom') setRange('custom'); else updateRangeHint(); });
+}
 
 $('#btnRun').dataset.label = '▶ Run Backtest';
 $('#btnLive').dataset.label = '◉ Go Live';
@@ -877,10 +1002,7 @@ window.addEventListener('resize', () => {
 // ------------------------------------------------------------------ boot
 
 (function init() {
-  const today = new Date();
-  const twoYears = new Date(today.getTime() - 730 * 86400e3);
-  $('#end').value = today.toISOString().slice(0, 10);
-  $('#start').value = twoYears.toISOString().slice(0, 10);
+  applyRange(); // fills start/end from the default 2-year preset
 
   loadLanguages().then(() => {
     codeEl.value = TEMPLATES[$('#language').value] || TEMPLATES.python;

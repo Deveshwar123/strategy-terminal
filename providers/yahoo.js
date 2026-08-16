@@ -19,8 +19,12 @@
 //      (AAPL's first bar is 0.1244 raw vs 0.0951 adjusted across 5 splits). So each
 //      bar's open/high/low/close is scaled by adjclose/close before it leaves here.
 //
-// Intraday history is capped by Yahoo and cannot be worked around: ~30d of 1m, 60d of
-// 5m/15m/30m, 730d of 1h. Deep history is daily-and-up only.
+// Intraday history is capped by Yahoo and cannot be worked around: 8d per request for 1m
+// (~30d exists, but only in chunks), 60d of 5m/15m/30m, 730d of 1h. Deep history is
+// daily-and-up only.
+//
+// `range: 'max'` here means "since the symbol's first trade", resolved from
+// meta.firstTradeDate rather than guessed — see inceptionEpoch().
 
 const https = require('node:https');
 const fs = require('node:fs');
@@ -38,7 +42,13 @@ const SOFT_LIMIT_PER_MIN = 60;
 
 // `maxDays` is Yahoo's server-side cap on how far back that interval is available.
 const TIMEFRAMES = {
-  '1Min': { interval: '1m', intraday: true, maxDays: 30 },
+  // 1Min is the one place Yahoo's *storage* window and its *per-request* window disagree:
+  // it holds ~30 days but refuses any single request wider than 8 days. Since nothing here
+  // stitches multiple requests together, 7 is the honest cap — asking for 30 just errors.
+  '1Min': {
+    interval: '1m', intraday: true, maxDays: 7,
+    note: 'Yahoo holds ~30 days of 1Min bars but serves at most 8 days per request, and the terminal does not stitch requests together.',
+  },
   '5Min': { interval: '5m', intraday: true, maxDays: 60 },
   '15Min': { interval: '15m', intraday: true, maxDays: 60 },
   '30Min': { interval: '30m', intraday: true, maxDays: 60 },
@@ -48,7 +58,17 @@ const TIMEFRAMES = {
   '1Month': { interval: '1mo', intraday: false, maxDays: null },
 };
 
-const TTL_MS = { intraday: 5 * 60 * 1000, daily: 12 * 60 * 60 * 1000 };
+const TTL_MS = {
+  intraday: 5 * 60 * 1000,
+  daily: 12 * 60 * 60 * 1000,
+  // A symbol's first trading day is history: it cannot change. Re-probed monthly only so
+  // a stale cache entry for a re-listed ticker eventually corrects itself.
+  inception: 30 * 24 * 60 * 60 * 1000,
+};
+
+// Fallback floor for "max" when Yahoo omits firstTradeDate: 1900-01-01. Negative epochs
+// are accepted by the endpoint (verified against ^GSPC, whose history starts in 1927).
+const FLOOR_EPOCH = -2208988800;
 
 function ensureDirs() { fs.mkdirSync(DATA_DIR, { recursive: true }); }
 
@@ -203,33 +223,70 @@ function parseChart(payload) {
       instrumentType: rmeta.instrumentType,
       granularity: rmeta.dataGranularity,
       splitCount: Object.keys(splits).length,
+      firstTradeDate: Number.isFinite(Number(rmeta.firstTradeDate)) ? Number(rmeta.firstTradeDate) : null,
     },
   };
+}
+
+// The epoch of the symbol's first ever trade — what "max" has to mean if it is going to
+// mean anything. Yahoo ships it in chart meta on every response, so this probe is the
+// cheapest request the endpoint serves (one bar) and its answer is cached for a month.
+//
+// Deliberately NOT `range=max`: that path coarsens the interval (see the header note).
+// The probe only reads meta, so the single bar it returns is thrown away.
+async function inceptionEpoch(symbol) {
+  const r = await getCached(`inception_${symbol}`, symbol, { range: '1d', interval: '1d' }, TTL_MS.inception);
+  const rmeta = r.payload && r.payload.chart && r.payload.chart.result && r.payload.chart.result[0]
+    && r.payload.chart.result[0].meta;
+  const first = rmeta && Number(rmeta.firstTradeDate);
+  return { epoch: Number.isFinite(first) ? first : null, cached: r.cached };
 }
 
 function epochOf(dateStr, endOfDay) {
   return Math.floor(new Date(dateStr + (endOfDay ? 'T23:59:59Z' : 'T00:00:00Z')).getTime() / 1000);
 }
 
-async function fetchBars({ symbol, timeframe, start, end, limit, force }, _apiKey) {
+async function fetchBars({ symbol, timeframe, start, end, limit, force, range }, _apiKey) {
   const tf = TIMEFRAMES[timeframe];
   if (!tf) throw new Error(`Unsupported timeframe "${timeframe}". Yahoo supports: ${Object.keys(TIMEFRAMES).join(', ')}`);
 
   const sym = String(symbol || '').trim().toUpperCase();
   if (!sym) throw new Error('No symbol.');
 
-  // Default lookback: 20 years of daily is free here, so there is no reason to be shy.
   const to = end ? epochOf(end, true) : Math.floor(Date.now() / 1000);
-  let from = start ? epochOf(start, false) : to - 20 * 365 * 86400;
+
+  // "max" is resolved to a real date, never left to Yahoo's own range=max — one probe
+  // request for firstTradeDate, then the normal explicit-epoch path. A day of slack in
+  // front of it keeps the first session from falling outside the window on a rounding edge.
+  let inception = null;
+  let probeCalls = 0;
+  let from;
+  if (String(range || '').toLowerCase() === 'max') {
+    const probe = await inceptionEpoch(sym);
+    inception = probe.epoch;
+    if (!probe.cached) probeCalls = 1;
+    from = inception != null ? inception - 86400 : FLOOR_EPOCH;
+  } else {
+    // Default lookback: 20 years of daily is free here, so there is no reason to be shy.
+    from = start ? epochOf(start, false) : to - 20 * 365 * 86400;
+  }
   if (from >= to) throw new Error('Start date must be before end date.');
 
   // Clamp intraday to Yahoo's server-side window instead of letting it return an empty
   // series that would look like "your strategy found no bars".
+  // The +6h is not cosmetic: clamping to exactly now-maxDays lands ON Yahoo's boundary and
+  // it rejects the request outright ("range must be within the last 60 days") instead of
+  // trimming it. Costs at most one partial session at the far edge.
   let clamped = null;
   if (tf.maxDays) {
-    const earliest = Math.floor(Date.now() / 1000) - tf.maxDays * 86400;
+    const earliest = Math.floor(Date.now() / 1000) - tf.maxDays * 86400 + 6 * 3600;
     if (from < earliest) {
-      clamped = { requested: new Date(from * 1000).toISOString().slice(0, 10), maxDays: tf.maxDays };
+      clamped = {
+        requested: new Date(from * 1000).toISOString().slice(0, 10),
+        maxDays: tf.maxDays,
+        effectiveFrom: new Date(earliest * 1000).toISOString().slice(0, 10),
+        note: tf.note || null,
+      };
       from = earliest;
     }
   }
@@ -241,7 +298,14 @@ async function fetchBars({ symbol, timeframe, start, end, limit, force }, _apiKe
   const parsed = parseChart(r.payload);
   let bars = parsed.bars;
   const availableBars = bars.length;
-  if (limit && bars.length > limit) bars = bars.slice(-limit);
+
+  // maxBars keeps the newest bars, so a symbol with more history than the cap silently
+  // loses its oldest years — exactly the years "max" was asked for. Report the cut.
+  let truncated = null;
+  if (limit && bars.length > limit) {
+    truncated = { availableBars, limit, droppedFrom: bars[0].t, keptFrom: bars[bars.length - limit].t };
+    bars = bars.slice(-limit);
+  }
 
   // Prices are adjusted above, so a surviving gap is real news, not a corporate action.
   // Still surfaced — a 40% single-bar move is worth a human look either way.
@@ -258,9 +322,15 @@ async function fetchBars({ symbol, timeframe, start, end, limit, force }, _apiKe
       assetClass: parsed.meta.instrumentType ? String(parsed.meta.instrumentType).toLowerCase() : 'stock',
       cached: r.cached,
       fetchedAt: r.fetchedAt,
-      apiCalls: r.cached ? 0 : 1,
+      apiCalls: (r.cached ? 0 : 1) + probeCalls,
       availableBars,
       earliest: bars.length ? bars[0].t : null,
+      // Where the request window actually landed, which for range=max is the answer to
+      // "when did this thing start trading?" rather than anything the caller supplied.
+      range: range || null,
+      inception: inception != null ? new Date(inception * 1000).toISOString() : null,
+      requestedFrom: new Date(from * 1000).toISOString(),
+      truncated,
       adjusted: parsed.adjusted,
       splitCount: parsed.meta.splitCount,
       currency: parsed.meta.currency,

@@ -65,6 +65,31 @@ and the button reads **Use Yahoo (no key)**.
 stayed free and the README told you to fall back to `BINANCE:BTCUSDT`; Finnhub has since
 paywalled those too, so that escape hatch is gone (see ST-5 in `BUGS.md`). Use Yahoo.
 
+### Picking a date range
+
+The runbar has a **Range** dropdown — `1 month` through `20 years`, `YTD`, **`Max`**, and
+`Custom…`. Presets resolve to real start/end dates in the browser and fill the two date
+boxes so you can see the exact window that will run; the boxes only become editable under
+`Custom` (typing in one switches to `Custom` for you).
+
+**`Max` means "since the symbol's first trade", not "as far back as the feed feels like".**
+The browser can't know when a ticker listed, so `Max` travels to the provider as
+`range: 'max'` and Yahoo resolves it from `meta.firstTradeDate` — a one-bar probe request,
+cached for 30 days because a first trading day never changes. The resolved date comes back
+in `meta.inception` and is printed in the results header (`SPY first traded 1993-01-29`).
+
+Verified reach: `SPY` 8,443 bars to 1993-01-29 · `NVDA` 6,933 to 1999-01-22 · `KO` 16,263 to
+1962-01-02 · `^GSPC` 24,772 to 1927-12-30 (negative epochs work fine).
+
+Two things `Max` will tell you about rather than hide:
+
+- **The Max bars cap clips the oldest bars, not the newest.** `^GSPC` has 24,772 daily bars
+  and the default cap in Settings is 20,000 — the run silently started in 1947 until the
+  results pane began warning about it. Raise **Max bars** to test the whole range.
+- **Intraday can't go back far, whatever Range says.** 1Min is 8 days *per request*, 5–30Min
+  60 days, 1Hour 730 days. `Max` on an intraday timeframe clamps to that window and the
+  results pane says so. Deep history means `1Day` or longer.
+
 ### Two Yahoo details that would silently corrupt a backtest
 
 Both are handled in `providers/yahoo.js`, and both are worth knowing if you ever touch it:
@@ -159,8 +184,13 @@ when the quota runs out rather than failing silently.
 ## Adding a provider
 
 Write `providers/<name>.js` exporting `fetchBars({symbol, timeframe, start, end, limit,
-force}, apiKey) -> {bars, meta}`, plus `verifyKey`, `latestQuote`, `usage`, and
+force, range}, apiKey) -> {bars, meta}`, plus `verifyKey`, `latestQuote`, `usage`, and
 `TIMEFRAMES`. Register it in `providers/index.js`. Nothing else changes.
+
+`range: 'max'` overrides `start` and means "from inception". Resolve it however your feed
+allows — Yahoo reads `meta.firstTradeDate`, the other two just ask for everything the
+endpoint holds — and report what you resolved in `meta.inception` / `meta.requestedFrom`.
+If `limit` clips bars, say so in `meta.truncated`; the UI turns that into a warning.
 
 ## Adding a language
 
@@ -174,7 +204,8 @@ Use `runners/python.py` as the reference; it's pure stdlib and the easiest to po
 
 ## Notes
 
-- Timeframes: `1Min 5Min 15Min 30Min 1Hour 1Day 1Week 1Month`.
+- Timeframes: `1Min 5Min 15Min 30Min 1Hour 1Day 1Week 1Month`. Ranges: `1m 3m 6m YTD 1y 2y
+  5y 10y 20y Max Custom`.
 - `.credentials.json` holds your API key and the chosen provider at chmod 600, gitignored.
 - `data/` (cached bars + the usage counter) is gitignored too — delete it any time to
   force fresh fetches, at the cost of requests.

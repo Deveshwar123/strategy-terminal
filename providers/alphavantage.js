@@ -206,14 +206,18 @@ function monthsBetween(start, end) {
 // ------------------------------------------------------------------- public
 
 // Returns { bars, meta } where meta explains where the data came from and what it cost.
-async function fetchBars({ symbol, timeframe, start, end, limit, force, maxCalls = 6 }, apiKey) {
+async function fetchBars({ symbol, timeframe, start, end, limit, force, range, maxCalls = 6 }, apiKey) {
   const tf = TIMEFRAMES[timeframe];
   if (!tf) throw new Error(`Unsupported timeframe "${timeframe}". Alpha Vantage supports: ${Object.keys(TIMEFRAMES).join(', ')}`);
 
   const sym = String(symbol || '').trim().toUpperCase();
   if (!sym) throw new Error('No symbol.');
 
-  const startMs = start ? new Date(start + 'T00:00:00Z').getTime() : -Infinity;
+  // Alpha Vantage publishes no inception date, and `outputsize=full` already returns the
+  // whole daily series, so "max" is simply "don't filter the front" — which for intraday
+  // still means only what the endpoint holds, not the symbol's real history.
+  const maxRange = String(range || '').toLowerCase() === 'max';
+  const startMs = start && !maxRange ? new Date(start + 'T00:00:00Z').getTime() : -Infinity;
   const endMs = end ? new Date(end + 'T23:59:59Z').getTime() : Infinity;
 
   const meta = { provider: 'alphavantage', cached: true, apiCalls: 0, requests: [], adjusted: false };
@@ -279,8 +283,15 @@ async function fetchBars({ symbol, timeframe, start, end, limit, force, maxCalls
   });
   meta.availableBars = total;
   meta.earliest = total ? bars[0] && bars[0].t : null;
+  meta.range = range || null;
+  meta.inception = null; // not published by Alpha Vantage
+  meta.requestedFrom = startMs === -Infinity ? null : new Date(startMs).toISOString();
 
-  if (limit && bars.length > limit) bars = bars.slice(-limit);
+  meta.truncated = null;
+  if (limit && bars.length > limit) {
+    meta.truncated = { availableBars: bars.length, limit, droppedFrom: bars[0].t, keptFrom: bars[bars.length - limit].t };
+    bars = bars.slice(-limit);
+  }
 
   // Free-tier daily data is NOT split-adjusted; a 2:1 split shows up as a 50% overnight
   // gap that a backtest will happily book as a real loss. Flag it rather than hide it.

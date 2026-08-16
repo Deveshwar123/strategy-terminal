@@ -182,14 +182,19 @@ function parseCandles(payload) {
   return bars;
 }
 
-async function fetchBars({ symbol, timeframe, start, end, limit, force }, apiKey) {
+async function fetchBars({ symbol, timeframe, start, end, limit, force, range }, apiKey) {
   const tf = TIMEFRAMES[timeframe];
   if (!tf) throw new Error(`Unsupported timeframe "${timeframe}". Finnhub supports: ${Object.keys(TIMEFRAMES).join(', ')}`);
 
   const routed = classify(symbol);
   if (!routed.symbol) throw new Error('No symbol.');
 
-  const from = Math.floor((start ? new Date(start + 'T00:00:00Z').getTime() : Date.now() - 730 * 86400e3) / 1000);
+  // Finnhub publishes no inception date, so "max" is just epoch 0 — the endpoint returns
+  // whatever history the plan entitles you to and clips the rest server-side.
+  const maxRange = String(range || '').toLowerCase() === 'max';
+  const from = maxRange
+    ? 0
+    : Math.floor((start ? new Date(start + 'T00:00:00Z').getTime() : Date.now() - 730 * 86400e3) / 1000);
   const to = Math.floor((end ? new Date(end + 'T23:59:59Z').getTime() : Date.now()) / 1000);
   if (from >= to) throw new Error('Start date must be before end date.');
 
@@ -199,7 +204,12 @@ async function fetchBars({ symbol, timeframe, start, end, limit, force }, apiKey
 
   let bars = parseCandles(r.payload);
   const availableBars = bars.length;
-  if (limit && bars.length > limit) bars = bars.slice(-limit);
+
+  let truncated = null;
+  if (limit && bars.length > limit) {
+    truncated = { availableBars, limit, droppedFrom: bars[0].t, keptFrom: bars[bars.length - limit].t };
+    bars = bars.slice(-limit);
+  }
 
   // Finnhub equity candles are split-adjusted, but a corporate action or a thin symbol
   // can still produce a wild gap — worth flagging rather than silently booking as P&L.
@@ -220,6 +230,10 @@ async function fetchBars({ symbol, timeframe, start, end, limit, force }, apiKey
       availableBars,
       earliest: bars.length ? bars[0].t : null,
       adjusted: routed.assetClass === 'stock',
+      range: range || null,
+      inception: null, // not published by Finnhub
+      requestedFrom: new Date(from * 1000).toISOString(),
+      truncated,
       suspectSplits: suspectSplits.slice(0, 5),
     },
   };

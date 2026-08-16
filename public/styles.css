@@ -67,6 +67,9 @@ input, select, textarea {
 }
 input:focus, select:focus, textarea:focus { border-color: var(--series-1); }
 input[type="date"] { color-scheme: dark; }
+/* A preset range still shows the dates it resolved to — readable, just not editable. */
+input:disabled { opacity: .55; cursor: not-allowed; }
+.runbar .hint { align-self: flex-end; padding-bottom: 7px; max-width: 260px; }
 label.field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-muted); }
 label.field > span { text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
 

@@ -73,8 +73,17 @@ async function livePoll() {
     const c = live.cfg;
     // force:true bypasses the disk cache -- the whole point of a live tick is fresh data.
     const api = providers.get(creds.provider).module;
+
+    // A tick only needs bars newer than the ones already held. Re-pulling a max range
+    // every poll would drag 30+ years across the wire to learn about one new bar, so the
+    // full history is fetched once at session start and each tick asks for a recent
+    // window instead — merging below is keyed on timestamp, so the overlap is free.
+    const window = c.range === 'max'
+      ? { start: new Date(Date.now() - 30 * 86400e3).toISOString().slice(0, 10), range: '' }
+      : { start: c.start, range: c.range };
+
     const { bars } = await api.fetchBars(
-      { symbol: c.symbol, timeframe: c.timeframe, start: c.start, end: '', force: true },
+      { symbol: c.symbol, timeframe: c.timeframe, start: window.start, range: window.range, end: '', force: true },
       creds.apiKey
     );
 
@@ -210,12 +219,12 @@ const routes = {
 
   'POST /api/run': async (body) => {
     const { creds, prov, api } = withProvider();
-    const { language, code, symbol, timeframe, start, end, params, config } = body;
+    const { language, code, symbol, timeframe, start, end, range, params, config } = body;
     if (!code || !code.trim()) throw httpErr(400, 'No strategy code.');
     if (!symbol) throw httpErr(400, 'No symbol.');
 
     const { bars, meta } = await api.fetchBars(
-      { symbol, timeframe, start, end, limit: body.maxBars, force: body.force },
+      { symbol, timeframe, start, end, range, limit: body.maxBars, force: body.force },
       creds.apiKey
     );
 
@@ -223,7 +232,9 @@ const routes = {
       throw httpErr(422,
         `${prov.label} returned ${bars.length} bars for ${String(symbol).toUpperCase()} ${timeframe} in that date range` +
         (meta.availableBars ? ` (${meta.availableBars} bars exist outside it — earliest is ${meta.earliest || 'unknown'}).` : '.') +
-        `\n\nCheck the symbol and widen the dates.` +
+        (range === 'max'
+          ? `\n\nThe range was already Max (everything since inception), so this is a symbol or timeframe problem, not a date problem.`
+          : `\n\nCheck the symbol and widen the dates — or set Range to Max.`) +
         (prov.id === 'finnhub'
           ? ` For Finnhub, a bare ticker means US equities; crypto needs a venue prefix like BINANCE:BTCUSDT.`
           : prov.id === 'yahoo'
@@ -259,11 +270,11 @@ const routes = {
       timeframe: body.timeframe || '5Min',
       language: body.language, code: body.code,
       params: body.params || {}, config: body.config || {},
-      start: body.start, pollSeconds, perHour,
+      start: body.start, range: body.range, pollSeconds, perHour,
     };
     if (!c.symbol || !c.code) throw httpErr(400, 'Symbol and code are required.');
 
-    const { bars } = await api.fetchBars({ symbol: c.symbol, timeframe: c.timeframe, start: c.start, end: '' }, creds.apiKey);
+    const { bars } = await api.fetchBars({ symbol: c.symbol, timeframe: c.timeframe, start: c.start, range: c.range, end: '' }, creds.apiKey);
     if (!bars.length) throw httpErr(422, `No bars returned for ${c.symbol} ${c.timeframe}.`);
 
     live.bars = bars;

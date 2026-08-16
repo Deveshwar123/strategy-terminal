@@ -2,7 +2,7 @@
 // Provider registry. Every provider exposes the same four functions, so server.js
 // never branches on which one is active:
 //
-//   fetchBars({symbol, timeframe, start, end, limit, force}, apiKey) -> { bars, meta }
+//   fetchBars({symbol, timeframe, start, end, limit, force, range}, apiKey) -> { bars, meta }
 //   verifyKey(apiKey)                                               -> { symbol, price, ... }
 //   latestQuote(symbol, apiKey)                                     -> { symbol, price, ... }
 //   usage()                                                         -> { used, limit, remaining, label }
@@ -12,6 +12,10 @@
 
 // `keyless: true` means fetchBars ignores the apiKey argument entirely. server.js uses
 // the flag to skip its credential gate; everything else about the contract is identical.
+//
+// `range: 'max'` overrides `start` and means "from the symbol's inception". Providers
+// resolve it however they can — Yahoo reads meta.firstTradeDate, the other two simply
+// ask for everything the endpoint holds — and report the resolved window in meta.
 
 const yahoo = require('./yahoo');
 const finnhub = require('./finnhub');
@@ -27,7 +31,7 @@ const PROVIDERS = {
     keyPlaceholder: '',
     limitNote: 'No API key and no daily quota. 40+ years of split-adjusted daily bars.',
     warning:
-      'Intraday history is capped by Yahoo and cannot be extended: ~30 days of 1Min, 60 days of ' +
+      'Intraday history is capped by Yahoo and cannot be extended: 8 days per request for 1Min, 60 days of ' +
       '5–30Min, 730 days of 1Hour. Deep history is 1Day and up. This is an undocumented public ' +
       'endpoint — free and reliable in practice, but not a contract Yahoo owes you.',
   },
