@@ -254,6 +254,28 @@ function check(name, cond, detail) {
   const msgSome = (seeSome.logs[0] || {}).msg || '';
   check('pivot view at bar 300 ignores bars 301+', !!msgAll && msgAll === msgSome, `${msgAll} vs ${msgSome}`);
 
+  // ---- front-end parses at all
+  // The engine tests above all pass with a completely broken UI: nothing here ever loaded
+  // public/app.js. A stray backtick inside the API_REF template literal shipped exactly
+  // that way (ST-9) — the whole script failed to parse, so the page did nothing at all.
+  console.log('\nFront-end:');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const vm = require('node:vm');
+  const appSrc = fs.readFileSync(path.join(__dirname, 'public', 'app.js'), 'utf8');
+  const htmlSrc = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
+  let parseErr = null;
+  try { new vm.Script(appSrc, { filename: 'public/app.js' }); } catch (e) { parseErr = e.message; }
+  check('public/app.js parses', !parseErr, parseErr);
+
+  // A selector with no matching element throws at load and takes the whole page with it,
+  // which looks identical to "the terminal stopped getting data".
+  const htmlIds = new Set([...htmlSrc.matchAll(/id="([^"]+)"/g)].map((m) => m[1]));
+  const runtimeIds = new Set([...appSrc.matchAll(/id="([^"$]+)"/g)].map((m) => m[1]));
+  const queried = [...new Set([...appSrc.matchAll(/\$\('#([A-Za-z0-9_-]+)'\)/g)].map((m) => m[1]))];
+  const orphans = queried.filter((id) => !htmlIds.has(id) && !runtimeIds.has(id));
+  check(`all ${queried.length} app.js selectors resolve`, orphans.length === 0, `missing from index.html: ${orphans.join(', ')}`);
+
   // ---- error surfacing
   console.log('\nError handling:');
   const broken = await engine.backtest({

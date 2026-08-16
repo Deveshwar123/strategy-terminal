@@ -165,8 +165,8 @@ PRICE LEVELS       "has price been here before, and is it here again?"
   retest(tol, left, right, lookback, min_touches)   the level TODAY is revisiting, else null
 
                    js is camelCase: countTouches  barsAgo  lastI
-                   a pivot needs `right` later bars to confirm, so it only becomes visible
-                   `right` bars after it happened -- that is real, not a bug to fix
+                   a pivot needs 'right' later bars to confirm, so it only becomes visible
+                   'right' bars after it happened -- that is real, not a bug to fix
 
 OTHER              ctx.param(name, default)   reads the Params JSON box
                    ctx.log(...)               -> Console tab

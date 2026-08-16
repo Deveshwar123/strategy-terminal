@@ -4,6 +4,43 @@ Tickets opened and closed against Strategy Terminal. Newest first.
 
 ---
 
+## ST-9 — One backtick broke the entire UI; "terminal not getting data" · CLOSED 2026-08-16
+
+**Symptom.** Reported as the terminal no longer fetching data. It was worse than that:
+**nothing on the page worked at all** — no dropdowns, no buttons, no charts. The server was
+healthy the whole time and served bars correctly on request.
+
+**Root cause.** Mine, shipped in `f6172dd`. Documenting the new level API in the in-editor
+`API_REF` string, I wrote `` `right` `` around a parameter name — inside a **backtick-delimited
+template literal**. That closed the literal early and `public/app.js` failed to parse.
+A script that does not parse never executes a single line, so the page rendered as static
+HTML with dead controls. "Not getting data" was the visible symptom of a total front-end
+failure, which is why the backend looked fine under every test.
+
+**Fix.** Single quotes instead of backticks in that string (`public/app.js:168`).
+
+**Why it shipped.** This is the real defect. `selftest.js` had 29 checks and **not one of them
+loaded `public/app.js`** — every check exercised the engine and runners through Node, so the
+entire test suite passed with a completely broken UI. ST-1 through ST-4 were all UI bugs found
+by eyeballing the browser, and the same blind spot was still there.
+
+**Fix for that.** Two new checks in `selftest.js`:
+
+- `public/app.js parses` — compiles the file with `vm.Script`.
+- `all 63 app.js selectors resolve` — every `$('#id')` in `app.js` must match an `id` in
+  `index.html` or one the script builds itself. A selector returning null throws at load and
+  takes the whole page down, which looks identical to this bug from the outside.
+
+**Verification.** Negative control: reintroducing the backtick makes the suite fail with
+`✗ public/app.js parses — Unexpected identifier 'right'`. Restored, 31/31 pass, and a default
+backtest returns 500 bars / 9 trades through the running server.
+
+**Lesson worth keeping.** A green test suite that never loads the front-end says nothing about
+whether the app works. Backend health checks actively mislead here — every one of them passed
+while the page was dead.
+
+---
+
 ## ST-8 — 1Min timeframe errored on any start date older than 8 days · CLOSED 2026-08-16
 
 **Symptom.** Found while testing the new Max range against every timeframe: `1Min` threw
