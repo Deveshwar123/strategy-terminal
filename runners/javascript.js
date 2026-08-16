@@ -126,6 +126,41 @@ function applyFill(side, qty, price) {
 
 function at(arr, back) { const k = i - (back || 0); return k >= 0 && k < N ? arr[k] : null; }
 
+// ---- price levels
+// Default half-width of a level, as a fraction of its own price. "Did price come back to
+// the same point" is never an exact float match, so every comparison is a 0.2% band.
+const TOL_DEFAULT = 0.002;
+const pivotCache = new Map();
+
+// Every swing point as [index, price, kind]. A pivot at j is not knowable until bar
+// j+right — it takes that many later bars to prove nothing exceeded it — so reads are
+// gated on that confirmation index. Ties compare `>` left and `>=` right, making the last
+// bar of a flat top the pivot; arbitrary, but it must match the other two runners exactly.
+function pivotMarks(left, right) {
+  const key = `${left}:${right}`;
+  if (pivotCache.has(key)) return pivotCache.get(key);
+  const out = [];
+  for (let j = left; j < N - right; j++) {
+    const h = highs[j], l = lows[j];
+    let isHigh = true, isLow = true;
+    for (let a = 1; a <= left; a++) {
+      if (highs[j - a] > h) isHigh = false;
+      if (lows[j - a] < l) isLow = false;
+      if (!isHigh && !isLow) break;
+    }
+    if (isHigh || isLow) {
+      for (let b = 1; b <= right; b++) {
+        if (highs[j + b] >= h) isHigh = false;
+        if (lows[j + b] <= l) isLow = false;
+      }
+    }
+    if (isHigh) out.push([j, h, 'high']);
+    if (isLow) out.push([j, l, 'low']);
+  }
+  pivotCache.set(key, out);
+  return out;
+}
+
 const ctx = {
   get i() { return i; },
   get bar() { return bars[i]; },
@@ -168,6 +203,97 @@ const ctx = {
   lowest(n, back) { return at(series('lowest', n, 'low'), back); },
   roc(n, back, source) { return at(series('roc', n, source || 'close'), back); },
   crossedAbove(a, b) { return a[0] > b[0] && a[1] <= b[1]; },
+
+  // ---- price levels: "has price been here before, and is it here again?"
+  window(n, source) {
+    const s = src(source || 'close');
+    const k = i + 1;
+    return s.slice(Math.max(0, k - n), k);
+  },
+
+  // Did that bar's range reach this price? back=1 asks about yesterday.
+  touched(level, tol, back) {
+    const lv = Number(level);
+    if (level == null || !isFinite(lv)) return false;
+    const k = i - (back || 0);
+    if (k < 0 || k >= N) return false;
+    const t = (tol == null ? TOL_DEFAULT : Number(tol)) * Math.abs(lv);
+    return lows[k] <= lv + t && highs[k] >= lv - t;
+  },
+
+  // How many EARLIER bars reached this price — the current bar is excluded, so this
+  // answers "how established is this level" before you act on today.
+  countTouches(level, lookback, tol) {
+    const lv = Number(level);
+    if (level == null || !isFinite(lv)) return 0;
+    const lb = lookback == null ? 250 : lookback;
+    const t = (tol == null ? TOL_DEFAULT : Number(tol)) * Math.abs(lv);
+    let c = 0;
+    for (let k = Math.max(0, i - lb); k < i; k++) {
+      if (lows[k] <= lv + t && highs[k] >= lv - t) c++;
+    }
+    return c;
+  },
+
+  // Confirmed swing highs/lows within lookback, oldest first.
+  pivots(left, right, lookback, kind) {
+    const L = left == null ? 2 : left, R = right == null ? 2 : right;
+    const lo = i - (lookback == null ? 250 : lookback);
+    const want = kind || 'both';
+    const out = [];
+    for (const [j, price, k] of pivotMarks(L, R)) {
+      if (j + R > i) break; // index-ordered, so nothing later is confirmed either
+      if (j < lo) continue;
+      if (want !== 'both' && k !== want) continue;
+      out.push({ price, i: j, kind: k, barsAgo: i - j });
+    }
+    return out;
+  },
+
+  // Swing points collapsed into price levels: pivots within tol of each other are the
+  // same level, and `touches` counts how many times price turned there. Sorted by touches
+  // desc, so levels()[0] is the most respected level in view.
+  levels(tol, left, right, lookback, minTouches) {
+    const t = tol == null ? TOL_DEFAULT : Number(tol);
+    const min = minTouches == null ? 1 : minTouches;
+    const clusters = [];
+    for (const p of ctx.pivots(left, right, lookback, 'both')) {
+      let hit = null;
+      for (const c of clusters) {
+        if (Math.abs(p.price - c.price) <= t * Math.abs(c.price)) { hit = c; break; }
+      }
+      if (!hit) {
+        clusters.push({
+          price: p.price, sum: p.price, touches: 1,
+          highs: p.kind === 'high' ? 1 : 0, lows: p.kind === 'low' ? 1 : 0, lastI: p.i,
+        });
+      } else {
+        hit.sum += p.price;
+        hit.touches += 1;
+        hit.price = hit.sum / hit.touches;
+        if (p.kind === 'high') hit.highs += 1; else hit.lows += 1;
+        if (p.i > hit.lastI) hit.lastI = p.i;
+      }
+    }
+    const out = [];
+    for (const c of clusters) {
+      if (c.touches < min) continue;
+      const kind = c.highs > c.lows ? 'high' : c.lows > c.highs ? 'low' : 'both';
+      out.push({ price: c.price, kind, touches: c.touches, lastI: c.lastI, barsAgo: i - c.lastI });
+    }
+    // The third sort key only exists to make ties total — two runners disagreeing on the
+    // order of equal-ranked levels would silently diverge their trades.
+    out.sort((a, b) => (b.touches - a.touches) || (a.price - b.price) || (a.lastI - b.lastI));
+    return out;
+  },
+
+  // The level today's bar is revisiting, or null. Most-touched level wins.
+  retest(tol, left, right, lookback, minTouches) {
+    for (const lv of ctx.levels(tol, left, right, lookback, minTouches)) {
+      if (lv.lastI < i && ctx.touched(lv.price, tol)) return lv;
+    }
+    return null;
+  },
 
   param(name, def) { return params && Object.prototype.hasOwnProperty.call(params, name) ? params[name] : def; },
   log(...args) {

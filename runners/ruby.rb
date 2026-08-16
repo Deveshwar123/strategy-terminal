@@ -31,7 +31,47 @@ LOGS   = []
 PLOTS  = {}
 
 CACHE   = {}
+PIVOT_CACHE = {}
 SOURCES = { 'close' => CLOSES, 'open' => OPENS, 'high' => HIGHS, 'low' => LOWS, 'volume' => VOLUMES }
+
+# Default half-width of a price level, as a fraction of the level's own price. "Did price
+# come back to the same point" is never an exact float match, so every level comparison is
+# a band: 0.2% either side by default.
+TOL_DEFAULT = 0.002
+
+# Every swing point as [index, price, kind]. A pivot at j is not knowable until bar
+# j+right -- it takes that many later bars to prove nothing exceeded it -- so reads are
+# gated on that confirmation index. Ties compare `>` on the left and `>=` on the right,
+# making the last bar of a flat top the pivot; arbitrary, but it has to be identical in
+# all three runners or they stop agreeing.
+def pivot_marks(left, right)
+  key = [left, right]
+  return PIVOT_CACHE[key] if PIVOT_CACHE.key?(key)
+
+  out = []
+  (left...(N - right)).each do |j|
+    h = HIGHS[j]
+    l = LOWS[j]
+    is_high = true
+    is_low  = true
+    (1..left).each do |a|
+      is_high = false if HIGHS[j - a] > h
+      is_low  = false if LOWS[j - a] < l
+      break if !is_high && !is_low
+    end
+    if is_high || is_low
+      (1..right).each do |b|
+        is_high = false if HIGHS[j + b] >= h
+        is_low  = false if LOWS[j + b] <= l
+      end
+    end
+    out << [j, h, 'high'] if is_high
+    out << [j, l, 'low']  if is_low
+  end
+
+  PIVOT_CACHE[key] = out
+  out
+end
 
 # Full causal indicator series: index k only uses bars <= k, so precomputing the
 # whole array cannot leak future data into a decision.
@@ -208,6 +248,105 @@ class Ctx
   def highest(n, back = 0);                 at(series('highest', n, 'high'), back); end
   def lowest(n, back = 0);                  at(series('lowest', n, 'low'), back);   end
   def roc(n, back = 0, source = 'close');   at(series('roc', n, source), back);   end
+
+  # ---- price levels: "has price been here before, and is it here again?"
+  def tol_or_default(tol); tol.nil? ? TOL_DEFAULT : tol.to_f; end
+  private :tol_or_default
+
+  # Last n values of a series, oldest first. Never includes a future bar.
+  def window(n, source = 'close')
+    s = SOURCES[source] || CLOSES
+    k = @i + 1
+    s[[0, k - n].max...k]
+  end
+
+  # Did that bar's range reach this price? back=1 asks about yesterday.
+  def touched(level, tol = nil, back = 0)
+    return false if level.nil?
+
+    lv = level.to_f
+    return false unless lv.finite?
+
+    k = @i - back
+    return false if k.negative? || k >= N
+
+    t = tol_or_default(tol) * lv.abs
+    LOWS[k] <= lv + t && HIGHS[k] >= lv - t
+  end
+
+  # How many EARLIER bars reached this price. Excludes the current bar, so it answers
+  # "how established is this level" before you act on today.
+  def count_touches(level, lookback = 250, tol = nil)
+    return 0 if level.nil?
+
+    lv = level.to_f
+    return 0 unless lv.finite?
+
+    t = tol_or_default(tol) * lv.abs
+    c = 0
+    ([0, @i - lookback].max...@i).each do |k|
+      c += 1 if LOWS[k] <= lv + t && HIGHS[k] >= lv - t
+    end
+    c
+  end
+
+  # Confirmed swing highs/lows within lookback, oldest first.
+  def pivots(left = 2, right = 2, lookback = 250, kind = 'both')
+    out = []
+    lo = @i - lookback
+    pivot_marks(left, right).each do |(j, price, k)|
+      break if j + right > @i # index-ordered, so nothing later is confirmed either
+      next if j < lo
+      next if kind != 'both' && k != kind
+
+      out << { 'price' => price, 'i' => j, 'kind' => k, 'bars_ago' => @i - j }
+    end
+    out
+  end
+
+  # Swing points collapsed into price levels: pivots within tol of each other are the same
+  # level, and `touches` counts how many times price turned there. Sorted by touches desc,
+  # so levels[0] is the most respected level in view.
+  def levels(tol = nil, left = 2, right = 2, lookback = 250, min_touches = 1)
+    t = tol_or_default(tol)
+    clusters = []
+    pivots(left, right, lookback, 'both').each do |p|
+      hit = clusters.find { |c| (p['price'] - c['price']).abs <= t * c['price'].abs }
+      if hit.nil?
+        clusters << {
+          'price' => p['price'], 'sum' => p['price'], 'touches' => 1,
+          'highs' => p['kind'] == 'high' ? 1 : 0, 'lows' => p['kind'] == 'low' ? 1 : 0,
+          'last_i' => p['i']
+        }
+      else
+        hit['sum'] += p['price']
+        hit['touches'] += 1
+        hit['price'] = hit['sum'] / hit['touches']
+        if p['kind'] == 'high' then hit['highs'] += 1 else hit['lows'] += 1 end
+        hit['last_i'] = p['i'] if p['i'] > hit['last_i']
+      end
+    end
+
+    out = clusters.reject { |c| c['touches'] < min_touches }.map do |c|
+      kind = if c['highs'] > c['lows'] then 'high'
+             elsif c['lows'] > c['highs'] then 'low'
+             else 'both'
+             end
+      { 'price' => c['price'], 'kind' => kind, 'touches' => c['touches'],
+        'last_i' => c['last_i'], 'bars_ago' => @i - c['last_i'] }
+    end
+    # The third sort key only exists to make ties total -- sort_by is not stable in Ruby,
+    # and two runners disagreeing on equal-ranked levels would silently diverge trades.
+    out.sort_by { |x| [-x['touches'], x['price'], x['last_i']] }
+  end
+
+  # The level today's bar is revisiting, or nil. Most-touched level wins.
+  def retest(tol = nil, left = 2, right = 2, lookback = 250, min_touches = 1)
+    levels(tol, left, right, lookback, min_touches).each do |lv|
+      return lv if lv['last_i'] < @i && touched(lv['price'], tol)
+    end
+    nil
+  end
 
   def param(name, default = nil); PARAMS.fetch(name.to_s, default); end
 

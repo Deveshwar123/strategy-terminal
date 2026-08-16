@@ -39,7 +39,55 @@ logs = []
 plots = {}
 
 _cache = {}
+_pivot_cache = {}
 _sources = {"close": closes, "open": opens, "high": highs, "low": lows, "volume": volumes}
+
+# Default half-width of a price level, as a fraction of the level's own price. "Did price
+# come back to the same point" is never an exact float match, so every level comparison is
+# a band: 0.2% either side by default.
+TOL_DEFAULT = 0.002
+
+
+def _pivot_marks(left, right):
+    """Every swing point in the series, as (index, price, kind).
+
+    A pivot at index j is not *knowable* until bar j+right — it takes that many later bars
+    to prove nothing exceeded it. The whole array is precomputed for speed, exactly like
+    the indicator series above, and every read is gated on that confirmation index so a
+    strategy can never see a pivot the market hadn't confirmed yet.
+
+    Ties are broken by comparing `>` on the left and `>=` on the right, which makes the
+    LAST bar of a flat top the pivot. Arbitrary, but it has to be identical in all three
+    runners or they stop agreeing.
+    """
+    key = (left, right)
+    if key in _pivot_cache:
+        return _pivot_cache[key]
+
+    out = []
+    for j in range(left, N - right):
+        h, l = highs[j], lows[j]
+        is_high = is_low = True
+        for a in range(1, left + 1):
+            if highs[j - a] > h:
+                is_high = False
+            if lows[j - a] < l:
+                is_low = False
+            if not is_high and not is_low:
+                break
+        if is_high or is_low:
+            for b in range(1, right + 1):
+                if highs[j + b] >= h:
+                    is_high = False
+                if lows[j + b] <= l:
+                    is_low = False
+        if is_high:
+            out.append((j, h, "high"))
+        if is_low:
+            out.append((j, l, "low"))
+
+    _pivot_cache[key] = out
+    return out
 
 
 def _series(kind, n, source):
@@ -280,6 +328,114 @@ class Ctx(object):
 
     def roc(self, n, back=0, source="close"):
         return self._at(_series("roc", n, source), back)
+
+    # ---- price levels: "has price been here before, and is it here again?"
+    def _tol(self, tol):
+        return TOL_DEFAULT if tol is None else float(tol)
+
+    def window(self, n, source="close"):
+        """Last n values of a series as a plain list, oldest first. Never includes a
+        future bar, so slicing it is safe."""
+        s = _sources.get(source, closes)
+        k = self.i + 1
+        return s[max(0, k - n):k]
+
+    def touched(self, level, tol=None, back=0):
+        """Did that bar's range reach this price? back=1 asks about yesterday."""
+        if level is None:
+            return False
+        try:
+            lv = float(level)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(lv):
+            return False
+        k = self.i - back
+        if k < 0 or k >= N:
+            return False
+        t = self._tol(tol) * abs(lv)
+        return lows[k] <= lv + t and highs[k] >= lv - t
+
+    def count_touches(self, level, lookback=250, tol=None):
+        """How many earlier bars reached this price. Excludes the current bar, so it
+        answers 'how well established is this level' before you act on today."""
+        if level is None:
+            return 0
+        try:
+            lv = float(level)
+        except (TypeError, ValueError):
+            return 0
+        if not math.isfinite(lv):
+            return 0
+        t = self._tol(tol) * abs(lv)
+        c = 0
+        for k in range(max(0, self.i - lookback), self.i):
+            if lows[k] <= lv + t and highs[k] >= lv - t:
+                c += 1
+        return c
+
+    def pivots(self, left=2, right=2, lookback=250, kind="both"):
+        """Confirmed swing highs/lows within lookback, oldest first."""
+        out = []
+        lo = self.i - lookback
+        for (j, price, k) in _pivot_marks(left, right):
+            if j + right > self.i:
+                break  # marks are index-ordered, so nothing later is confirmed either
+            if j < lo:
+                continue
+            if kind != "both" and k != kind:
+                continue
+            out.append({"price": price, "i": j, "kind": k, "bars_ago": self.i - j})
+        return out
+
+    def levels(self, tol=None, left=2, right=2, lookback=250, min_touches=1):
+        """Swing points collapsed into price levels: pivots within tol of each other are
+        the same level, and `touches` is how many times price turned there. Sorted by
+        touches desc, so levels()[0] is the most respected one in view."""
+        t = self._tol(tol)
+        clusters = []
+        for p in self.pivots(left, right, lookback, "both"):
+            hit = None
+            for c in clusters:
+                if abs(p["price"] - c["price"]) <= t * abs(c["price"]):
+                    hit = c
+                    break
+            if hit is None:
+                clusters.append({
+                    "price": p["price"], "_sum": p["price"], "touches": 1,
+                    "highs": 1 if p["kind"] == "high" else 0,
+                    "lows": 1 if p["kind"] == "low" else 0,
+                    "last_i": p["i"],
+                })
+            else:
+                hit["_sum"] += p["price"]
+                hit["touches"] += 1
+                hit["price"] = hit["_sum"] / hit["touches"]
+                if p["kind"] == "high":
+                    hit["highs"] += 1
+                else:
+                    hit["lows"] += 1
+                if p["i"] > hit["last_i"]:
+                    hit["last_i"] = p["i"]
+
+        out = []
+        for c in clusters:
+            if c["touches"] < min_touches:
+                continue
+            kind = "high" if c["highs"] > c["lows"] else ("low" if c["lows"] > c["highs"] else "both")
+            out.append({"price": c["price"], "kind": kind, "touches": c["touches"],
+                        "last_i": c["last_i"], "bars_ago": self.i - c["last_i"]})
+        # Third sort key only exists to make ties total — two runners disagreeing on the
+        # order of equal-ranked levels would silently diverge their trades.
+        out.sort(key=lambda x: (-x["touches"], x["price"], x["last_i"]))
+        return out
+
+    def retest(self, tol=None, left=2, right=2, lookback=250, min_touches=1):
+        """The level today's bar is revisiting, or None. Most-touched level wins."""
+        for lv in self.levels(tol, left, right, lookback, min_touches):
+            if lv["last_i"] < self.i and self.touched(lv["price"], tol):
+                return lv
+        return None
 
     # ---- misc
     def param(self, name, default=None):

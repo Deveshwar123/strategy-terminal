@@ -156,8 +156,61 @@ def on_bar(bar, ctx):
 **Position:** `position` `avg_price` `is_long` `is_short` `is_flat` `cash` `equity` `unrealized`
 **History:** `closes` `opens` `highs` `lows` `volumes`, and `close_(n)` for n bars back
 **Indicators:** `sma ema rsi atr stdev highest lowest roc`, each taking `(length, back=0)`
+**Levels:** `window touched count_touches pivots levels retest` — see below
 **Output:** `ctx.log(...)` → Console tab · `ctx.plot(name, value)` → overlays the price chart
 **Params:** `ctx.param('fast', 10)` reads the Params JSON box, so you can tune without editing code
+
+### Price levels — "has price been here before, and is it here again?"
+
+Indicators smooth the series; these read it as an array and ask about *specific prices*
+that price has turned at before. `tol` is always a **fraction of the level's own price**
+(`0.002` = a 0.2% band), because two bars never reach the same level to the cent.
+
+| call | answers |
+|---|---|
+| `window(n, src)` | last *n* values as a plain array, oldest first |
+| `touched(level, tol, back)` | did that bar's range reach this price? `back=1` = yesterday |
+| `count_touches(level, lookback, tol)` | how many **earlier** bars reached it (today excluded) |
+| `pivots(left, right, lookback, kind)` | confirmed swing points, oldest first |
+| `levels(tol, left, right, lookback, min_touches)` | pivots clustered into levels, most-touched first |
+| `retest(tol, left, right, lookback, min_touches)` | the level **today** is revisiting, else `None` |
+
+`levels()` returns `{price, kind, touches, last_i, bars_ago}` — `kind` is `'high'`,
+`'low'` or `'both'`, and `touches` is how many times price turned there, so
+`min_touches=2` means "only levels the market has respected more than once". JavaScript
+uses `countTouches` / `barsAgo` / `lastI`; Python and Ruby use snake_case.
+
+The literal version of "yesterday it reached a point, today it reaches it again":
+
+```python
+def on_bar(bar, ctx):
+    y = ctx.high_(1)                      # yesterday's high
+    if y is None:
+        return
+    if ctx.touched(y, 0.001) and ctx.is_flat:
+        ctx.buy(reason='revisited yesterday high %.2f' % y)
+```
+
+And the version that finds the levels for you rather than being told one:
+
+```python
+def on_bar(bar, ctx):
+    lv = ctx.retest(0.004, 2, 2, 250, min_touches=2)
+    if lv and lv['kind'] == 'low' and ctx.is_flat:
+        ctx.buy(reason='retest support %.2f (%d touches)' % (lv['price'], lv['touches']))
+```
+
+`strategies/Level Retest.json` is that idea complete with a stop and a target — open it
+from the **Open** button. On SPY daily over 5 years it takes 30 trades, wins 30% of them
+and returns −1.8% against buy & hold's +86.9%. It is a **worked example of the API, not a
+profitable system** — treat it as a starting point to beat, the same way the 50/200
+crossover is.
+
+**One thing about pivots that is real and not a bug:** confirming a swing high requires
+`right` bars *after* it, so a level only becomes visible a few bars after it formed. At the
+moment of the turn, nobody knows it was a turn. `selftest.js` proves the runners honour
+this — it re-runs the same strategy on a series truncated at bar 300 and asserts the level
+view is byte-identical to the full-series run.
 
 ### Two rules worth internalising
 

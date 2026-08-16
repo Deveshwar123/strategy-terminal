@@ -153,6 +153,21 @@ INDICATORS         every one takes (length, back = 0), back = 1 is last bar's va
   sma/ema/stdev/roc take a 3rd arg: 'close' | 'open' | 'high' | 'low' | 'volume'
   returns null/None/nil during warmup -- always guard before comparing
 
+PRICE LEVELS       "has price been here before, and is it here again?"
+                   tol is a FRACTION of the level price -- 0.002 = a 0.2% band. Levels are
+                   never an exact float match, so every comparison below uses that band.
+  window(n, src)                   last n values as an array, oldest first
+  touched(level, tol, back)        did that bar's range reach this price? back=1 = yesterday
+  count_touches(level, lookback, tol)   how many EARLIER bars reached it (excludes today)
+  pivots(left, right, lookback, kind)   confirmed swing points, oldest first
+  levels(tol, left, right, lookback, min_touches)   pivots clustered into levels,
+                                   most-touched first: {price, kind, touches, last_i, bars_ago}
+  retest(tol, left, right, lookback, min_touches)   the level TODAY is revisiting, else null
+
+                   js is camelCase: countTouches  barsAgo  lastI
+                   a pivot needs `right` later bars to confirm, so it only becomes visible
+                   `right` bars after it happened -- that is real, not a bug to fix
+
 OTHER              ctx.param(name, default)   reads the Params JSON box
                    ctx.log(...)               -> Console tab
                    ctx.plot(name, value)      -> overlays a line on the price chart

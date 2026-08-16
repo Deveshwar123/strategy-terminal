@@ -66,6 +66,51 @@ end
 `,
 };
 
+// Level retests: pivots, clustering and tolerance bands are ~80 lines of hand-ported
+// logic in each runner, and a one-character difference in a tie-break would show up as a
+// silently different trade list rather than an error. Same strategy, all three languages.
+const LEVEL_STRATS = {
+  javascript: `
+function onBar(bar, ctx) {
+  if (ctx.i === 300) ctx.log('levels=' + ctx.levels(0.004).length + ' pivots=' + ctx.pivots(2, 2, 250).length +
+    ' touches=' + ctx.countTouches(ctx.high_(1), 250, 0.004));
+  const lv = ctx.retest(0.004, 2, 2, 250, 2);
+  if (!lv) return;
+  if (lv.kind === 'low' && ctx.isFlat) ctx.buy(100, 'retest support');
+  else if (lv.kind === 'high' && ctx.isLong) ctx.close('retest resistance');
+}`,
+  python: `
+def on_bar(bar, ctx):
+    if ctx.i == 300:
+        ctx.log('levels=%d pivots=%d touches=%d' % (
+            len(ctx.levels(0.004)), len(ctx.pivots(2, 2, 250)),
+            ctx.count_touches(ctx.high_(1), 250, 0.004)))
+    lv = ctx.retest(0.004, 2, 2, 250, 2)
+    if lv is None:
+        return
+    if lv['kind'] == 'low' and ctx.is_flat:
+        ctx.buy(100, 'retest support')
+    elif lv['kind'] == 'high' and ctx.is_long:
+        ctx.close('retest resistance')
+`,
+  ruby: `
+def on_bar(bar, ctx)
+  if ctx.index == 300
+    ctx.log("levels=#{ctx.levels(0.004).length} pivots=#{ctx.pivots(2, 2, 250).length} " \\
+            "touches=#{ctx.count_touches(ctx.high_(1), 250, 0.004)}")
+  end
+  lv = ctx.retest(0.004, 2, 2, 250, 2)
+  return if lv.nil?
+
+  if lv['kind'] == 'low' && ctx.flat?
+    ctx.buy(100, 'retest support')
+  elsif lv['kind'] == 'high' && ctx.long?
+    ctx.close('retest resistance')
+  end
+end
+`,
+};
+
 // A strategy that reads ctx.position / ctx.cash mid-run, to confirm the harnesses'
 // mirrored portfolio state matches the engine's authoritative accounting.
 const STATE_STRATS = {
@@ -134,6 +179,34 @@ function check(name, cond, detail) {
   }
   check('strategy actually traded', base_trades(results, ids) > 3, 'too few trades to be a meaningful test');
 
+  // ---- price levels agree across languages
+  console.log('\nLevel retests (pivots, clustering, tolerance bands):');
+  const levelResults = {};
+  for (const id of available) {
+    const r = await engine.backtest({ language: id, code: LEVEL_STRATS[id], bars, params: {}, config: CONFIG });
+    if (!r.ok) { check(`${id} level strategy runs`, false, r.error.message); continue; }
+    levelResults[id] = r;
+    const seen = (r.logs[0] || {}).msg || '';
+    console.log(`  · ${id.padEnd(11)} ${String(r.stats.numTrades).padStart(3)} trades  ${seen}`);
+  }
+  const lids = Object.keys(levelResults);
+  if (lids.length) {
+    const first = levelResults[lids[0]];
+    // A level strategy that never fires would pass every equality check below by doing
+    // nothing at all, so prove it actually found levels and traded on them.
+    check('levels found and traded', first.stats.numTrades > 0 && /levels=[1-9]/.test((first.logs[0] || {}).msg || ''),
+      `${first.stats.numTrades} trades, log: ${(first.logs[0] || {}).msg || 'none'}`);
+    check('pivots confirmed, not clairvoyant', /pivots=[1-9]/.test((first.logs[0] || {}).msg || ''),
+      (first.logs[0] || {}).msg || 'no log');
+    const sig = (r) => JSON.stringify(r.fills.map((f) => [f.i, f.side, f.qty, +f.price.toFixed(6)]));
+    for (const id of lids.slice(1)) {
+      check(`${id} level fills identical to ${lids[0]}`, sig(levelResults[id]) === sig(first), 'level trade lists diverge');
+      check(`${id} level counts identical to ${lids[0]}`,
+        ((levelResults[id].logs[0] || {}).msg || '') === ((first.logs[0] || {}).msg || ''),
+        `${(levelResults[id].logs[0] || {}).msg} vs ${(first.logs[0] || {}).msg}`);
+    }
+  }
+
   // ---- portfolio state parity between harness and engine
   console.log('\nHarness portfolio state vs engine accounting:');
   for (const id of available) {
@@ -164,6 +237,22 @@ function check(name, cond, detail) {
   const pm = /len=(\d+) last=([\d.]+)/.exec((peek.logs[0] || {}).msg || '');
   check('history length == bar index + 1', pm && Number(pm[1]) === 11, pm ? `got ${pm[1]}` : 'no log');
   check('last visible close == current bar close', pm && Math.abs(Number(pm[2]) - bars[10].c) < 1e-9, pm ? `${pm[2]} vs ${bars[10].c}` : 'no log');
+
+  // Pivots are the one place lookahead could hide: confirming a swing high genuinely
+  // requires bars AFTER it, and the whole pivot array is precomputed over the full series.
+  // If that precomputation leaked, the view at bar 300 would improve when bars 301+ exist.
+  // Truncating the series to end at 300 must therefore change nothing.
+  const probe = available[0];
+  const levelPeek = probe === 'python'
+    ? "def on_bar(bar, ctx):\n    if ctx.i == 300:\n        L = ctx.levels(0.004)\n        ctx.log('p=%d l=%d top=%.4f' % (len(ctx.pivots(2, 2, 250)), len(L), L[0]['price'] if L else 0))\n"
+    : probe === 'ruby'
+      ? "def on_bar(bar, ctx)\n  if ctx.index == 300\n    l = ctx.levels(0.004)\n    ctx.log(format('p=%d l=%d top=%.4f', ctx.pivots(2, 2, 250).length, l.length, l.empty? ? 0 : l[0]['price']))\n  end\nend\n"
+      : "function onBar(bar, ctx){ if (ctx.i === 300) { const L = ctx.levels(0.004); ctx.log('p=' + ctx.pivots(2,2,250).length + ' l=' + L.length + ' top=' + (L[0] ? L[0].price.toFixed(4) : '0')); } }";
+  const seeAll = await engine.backtest({ language: probe, code: levelPeek, bars, params: {}, config: CONFIG });
+  const seeSome = await engine.backtest({ language: probe, code: levelPeek, bars: bars.slice(0, 301), params: {}, config: CONFIG });
+  const msgAll = (seeAll.logs[0] || {}).msg || '';
+  const msgSome = (seeSome.logs[0] || {}).msg || '';
+  check('pivot view at bar 300 ignores bars 301+', !!msgAll && msgAll === msgSome, `${msgAll} vs ${msgSome}`);
 
   // ---- error surfacing
   console.log('\nError handling:');
