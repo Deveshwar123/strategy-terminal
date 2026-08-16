@@ -1,5 +1,5 @@
-# API keys — never commit
-.credentials.json
+# API keys — never commit. Glob, not an exact name, so backups/variants can't slip in.
+.credentials*
 
 # saved strategies are personal
 strategies/*.json

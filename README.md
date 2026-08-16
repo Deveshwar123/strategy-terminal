@@ -15,8 +15,9 @@ node selftest.js        # runs the same strategy through every runtime and check
 ## How it works
 
 ```
-browser UI  ──▶  server.js  ──▶  providers/finnhub.js       ─┐
-                    │            providers/alphavantage.js  ─┴─ pick one in the UI
+browser UI  ──▶  server.js  ──▶  providers/yahoo.js         ─┐
+                    │            providers/finnhub.js        ├─ pick one in the UI
+                    │            providers/alphavantage.js  ─┘
                     │                  └─ disk cache + usage counter
                     ├──▶  runners/python.py    ─┐
                     ├──▶  runners/javascript.js ├─ your code, in a subprocess
@@ -35,24 +36,47 @@ all three languages, and why adding a language can't quietly change your numbers
 
 Each provider is isolated behind four functions (`fetchBars`, `verifyKey`, `latestQuote`,
 `usage`), registered in `providers/index.js`. Swapping providers doesn't touch the engine
-or the runners — this project has now moved Alpaca → Alpha Vantage → Finnhub, and all 20
-self-test checks kept passing untouched each time.
+or the runners — this project has now moved Alpaca → Alpha Vantage → Finnhub → Yahoo, and
+all 20 self-test checks kept passing untouched each time.
+
+A provider marked `keyless: true` in the registry skips the credential gate in
+`server.js`; nothing else about the contract changes.
 
 The browser can't reliably call a data API directly, and a key in a static HTML file is
 a key sitting in plaintext — hence the local server. It binds to `127.0.0.1` only.
 
 ## Providers
 
-| | free limit | catch |
-|---|---|---|
-| **Finnhub** (default) | 60 req/**minute** | **`/stock/candle` is a PAID endpoint.** Free keys get HTTP 403 on equity history — which is exactly what a backtest needs. Crypto (`BINANCE:BTCUSDT`) and forex (`OANDA:EUR_USD`) candles are free. |
-| **Alpha Vantage** | 25 req/**day** | Free daily bars are not split-adjusted. |
+| | key? | free limit | catch |
+|---|---|---|---|
+| **Yahoo Finance** (default) | **none** | no published quota | Intraday history is capped hard: ~30d of 1Min, 60d of 5–30Min, 730d of 1Hour. Undocumented public endpoint. |
+| **Finnhub** | required | 60 req/**minute** | **Candles are PAID.** Free keys get 403 on `/stock/candle` *and* `/crypto/candle` — verified 2026-08-15. Unusable for backtesting on a free key. |
+| **Alpha Vantage** | required | 25 req/**day** | Free daily bars are not split-adjusted. |
 
-Switch in the **API Keys** dialog; the key is stored per provider. Symbols route by
-prefix on Finnhub: a bare ticker is an equity, `VENUE:PAIR` goes to crypto or forex.
+Switch in the **API Keys** dialog. Yahoo needs no key, so the dialog hides the key field
+and the button reads **Use Yahoo (no key)**.
 
-**If Finnhub 403s you, that's the paywall, not a bug** — the error says so and points you
-at the alternatives. Alpha Vantage is the free fallback for equity daily bars.
+**Yahoo is the default because it's the only one that works out of the box.** It returns
+40+ years of split-adjusted daily bars — 8,443 for `SPY` back to 1993-01-29, 10,485 for
+`AAPL` back to 1985. Symbols are Yahoo-style: bare tickers for US equities (`AAPL`,
+`SPY`), `^GSPC` for indices, `BTC-USD` for crypto, `EURUSD=X` for forex.
+
+**If Finnhub 403s you, that's the paywall, not a bug.** It used to be that crypto candles
+stayed free and the README told you to fall back to `BINANCE:BTCUSDT`; Finnhub has since
+paywalled those too, so that escape hatch is gone (see ST-5 in `BUGS.md`). Use Yahoo.
+
+### Two Yahoo details that would silently corrupt a backtest
+
+Both are handled in `providers/yahoo.js`, and both are worth knowing if you ever touch it:
+
+- **`range=max` is a trap.** It doesn't mean "max daily bars" — Yahoo quietly coarsens the
+  interval to fit its bar budget, returning ~168 bars for 42 years of `interval=1d`. That
+  looks like data but is roughly quarterly. The provider always sends explicit
+  `period1`/`period2` epochs, which yields the true ~252 bars/year.
+- **The OHLC Yahoo ships is raw, not adjusted.** Only `adjclose` is adjusted. AAPL's first
+  bar is `0.1244` raw vs `0.0951` adjusted across 5 splits — feed the raw series to the
+  engine and every split books as a real overnight crash. The provider scales each bar's
+  open/high/low/close by `adjclose/close` before returning it.
 
 ### Both providers cache
 
@@ -70,6 +94,9 @@ much tighter budget:
   minutes and stops itself when the quota runs out; on Finnhub it can poll every 30s.
 
 ### Watch for unadjusted splits
+
+This applies to **Alpha Vantage only** — Yahoo bars are adjusted before they reach the
+engine, so the problem below can't arise there.
 
 Alpha Vantage's `TIME_SERIES_DAILY_ADJUSTED` is premium, so its free daily bars come back
 raw. A 2:1 split looks like a 50% overnight crash, and a backtest will happily book it as

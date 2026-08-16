@@ -409,7 +409,8 @@ function renderResult(r, bars, opts) {
       : `Possible unadjusted split: price gapped ${gaps}. This feed is raw, not split-adjusted, so a split looks like a real overnight move and the backtest will book it as P&L.`);
   }
 
-  const provName = r.meta && r.meta.provider === 'finnhub' ? 'Finnhub' : 'Alpha Vantage';
+  const PROV_NAMES = { yahoo: 'Yahoo Finance', finnhub: 'Finnhub', alphavantage: 'Alpha Vantage' };
+  const provName = (r.meta && PROV_NAMES[r.meta.provider]) || (r.meta && r.meta.provider) || 'provider';
   const src = r.meta
     ? `<div class="banner info">Data: ${esc(provName)}${r.meta.assetClass ? ` (${esc(r.meta.assetClass)})` : ''} · ${r.meta.cached ? `served from local cache (fetched ${new Date(r.meta.fetchedAt).toLocaleString()}) — 0 requests spent` : `${r.meta.apiCalls} request${r.meta.apiCalls === 1 ? '' : 's'} spent`}${r.usage ? ` · ${r.usage.used}/${r.usage.limit} ${esc(r.usage.label)}` : ''}</div>`
     : '';
@@ -714,8 +715,13 @@ function renderProviderPicker(list, selected) {
   }
   sel.value = selected || sel.value || list[0].id;
   const p = list.find((x) => x.id === sel.value) || list[0];
+  // A keyless provider has no field to fill and no key page to visit — hide both rather
+  // than showing an input that does nothing.
   $('#apiKey').placeholder = p.keyPlaceholder || '';
-  $('#keyLink').innerHTML = `— <a href="${esc(p.keyUrl)}" target="_blank" rel="noreferrer">get one</a>`;
+  $('#apiKey').disabled = !!p.keyless;
+  $('#apiKey').hidden = !!p.keyless;
+  $('#keyLink').innerHTML = p.keyless ? '' : `— <a href="${esc(p.keyUrl)}" target="_blank" rel="noreferrer">get one</a>`;
+  $('#btnConnect').textContent = p.keyless ? 'Use Yahoo (no key)' : 'Connect';
   $('#provLimit').textContent = p.limitNote || '';
   $('#provWarn').innerHTML = p.warning ? esc(p.warning) : '';
   $('#provWarn').hidden = !p.warning;
@@ -732,7 +738,9 @@ async function refreshStatus() {
     } else {
       dot.className = 'dot off';
       txt.textContent = 'no API key';
-      $('#keysModal').classList.add('open');
+      // Only nag when a key is genuinely required; the default provider needs none.
+      const dflt = (st.providers || []).find((p) => p.id === st.default);
+      if (!dflt || !dflt.keyless) $('#keysModal').classList.add('open');
     }
     renderProviderPicker(st.providers, st.provider || st.default);
     renderUsage(st.usage);
@@ -790,7 +798,7 @@ $('#btnConnect').onclick = async () => {
   msg.innerHTML = `<div class="banner info">Verifying with ${esc(prov ? prov.label : provId)}…</div>`;
   try {
     const r = await api('/api/connect', { provider: provId, apiKey: $('#apiKey').value });
-    msg.innerHTML = `<div class="banner info">Connected to ${esc(r.providerLabel)}. Key saved locally. Test quote: ${esc(r.quote.symbol)} @ ${nf(r.quote.price)}.</div>`;
+    msg.innerHTML = `<div class="banner info">Connected to ${esc(r.providerLabel)}. ${r.keyless ? 'No key needed.' : 'Key saved locally.'} Test quote: ${esc(r.quote.symbol)} @ ${nf(r.quote.price)}.</div>`;
     await refreshStatus();
     setTimeout(() => modal('#keysModal', false), 1200);
   } catch (e) {

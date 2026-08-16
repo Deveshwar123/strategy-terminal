@@ -29,9 +29,15 @@ function saveCreds(c) {
   try { fs.chmodSync(CRED_FILE, 0o600); } catch {}
 }
 
+// A keyless provider (Yahoo) has nothing to store, so an absent .credentials.json is a
+// working state rather than an error — fall through to the default provider.
 function requireCreds() {
   const c = loadCreds();
-  if (!c || !c.apiKey) throw httpErr(401, 'No API key set. Add one in the API Keys dialog.');
+  if (!c || !c.apiKey) {
+    const prov = providers.get(c && c.provider);
+    if (prov.keyless) return { provider: prov.id, apiKey: null };
+    throw httpErr(401, `No API key set for ${prov.label}. Add one in the API Keys dialog, or switch to a keyless provider.`);
+  }
   return c;
 }
 
@@ -148,13 +154,27 @@ const routes = {
 
   'GET /api/status': async () => {
     const creds = loadCreds();
-    if (!creds || !creds.apiKey) return { connected: false, providers: providers.list(), default: providers.DEFAULT };
-    const prov = providers.get(creds.provider);
+    const prov = providers.get(creds && creds.provider);
+    // Keyless providers are connected by definition — there is no key to be missing.
+    if (!creds || !creds.apiKey) {
+      if (!prov.keyless) return { connected: false, providers: providers.list(), default: providers.DEFAULT };
+      return {
+        connected: true,
+        provider: prov.id,
+        providerLabel: prov.label,
+        keyPreview: 'no key needed',
+        keyless: true,
+        usage: prov.module.usage(),
+        timeframes: Object.keys(prov.module.TIMEFRAMES),
+        providers: providers.list(),
+      };
+    }
     return {
       connected: true,
       provider: prov.id,
       providerLabel: prov.label,
       keyPreview: creds.apiKey.slice(0, 4) + '…' + creds.apiKey.slice(-3),
+      keyless: !!prov.keyless,
       verifiedAt: creds.verifiedAt,
       usage: prov.module.usage(),
       timeframes: Object.keys(prov.module.TIMEFRAMES),
@@ -164,11 +184,12 @@ const routes = {
 
   'POST /api/connect': async (body) => {
     const apiKey = (body.apiKey || '').trim();
-    if (!apiKey) throw httpErr(400, 'API key is required.');
     const prov = providers.get(body.provider);
-    const quote = await prov.module.verifyKey(apiKey); // costs one request
-    saveCreds({ provider: prov.id, apiKey, verifiedAt: new Date().toISOString() });
-    return { connected: true, provider: prov.id, providerLabel: prov.label, quote, usage: prov.module.usage() };
+    if (!apiKey && !prov.keyless) throw httpErr(400, `An API key is required for ${prov.label}.`);
+    // For a keyless provider this is a reachability check, not a key check.
+    const quote = await prov.module.verifyKey(apiKey || null); // costs one request
+    saveCreds({ provider: prov.id, apiKey: apiKey || null, verifiedAt: new Date().toISOString() });
+    return { connected: true, provider: prov.id, providerLabel: prov.label, keyless: !!prov.keyless, quote, usage: prov.module.usage() };
   },
 
   'POST /api/disconnect': async () => {
@@ -205,7 +226,11 @@ const routes = {
         `\n\nCheck the symbol and widen the dates.` +
         (prov.id === 'finnhub'
           ? ` For Finnhub, a bare ticker means US equities; crypto needs a venue prefix like BINANCE:BTCUSDT.`
-          : ` Intraday timeframes only go back ~30 days without per-month requests.`));
+          : prov.id === 'yahoo'
+            ? ` Yahoo symbols: bare tickers for US equities (AAPL, SPY), ^GSPC for indices, BTC-USD for crypto,` +
+              ` EURUSD=X for forex.` +
+              (meta.clamped ? ` Note: ${timeframe} history is capped at ${meta.clamped.maxDays} days, so the start date was clamped.` : '')
+            : ` Intraday timeframes only go back ~30 days without per-month requests.`));
     }
 
     const result = await engine.backtest({

@@ -10,10 +10,27 @@
 // To add a provider: write the module, add an entry below. Nothing else changes —
 // engine.js and the runners have no idea providers exist.
 
+// `keyless: true` means fetchBars ignores the apiKey argument entirely. server.js uses
+// the flag to skip its credential gate; everything else about the contract is identical.
+
+const yahoo = require('./yahoo');
 const finnhub = require('./finnhub');
 const alphavantage = require('./alphavantage');
 
 const PROVIDERS = {
+  yahoo: {
+    id: 'yahoo',
+    label: 'Yahoo Finance',
+    module: yahoo,
+    keyless: true,
+    keyUrl: '',
+    keyPlaceholder: '',
+    limitNote: 'No API key and no daily quota. 40+ years of split-adjusted daily bars.',
+    warning:
+      'Intraday history is capped by Yahoo and cannot be extended: ~30 days of 1Min, 60 days of ' +
+      '5–30Min, 730 days of 1Hour. Deep history is 1Day and up. This is an undocumented public ' +
+      'endpoint — free and reliable in practice, but not a contract Yahoo owes you.',
+  },
   finnhub: {
     id: 'finnhub',
     label: 'Finnhub',
@@ -22,9 +39,9 @@ const PROVIDERS = {
     keyPlaceholder: 'e.g. cq3k9h1r01qm8p9v2mtg',
     limitNote: '60 requests/minute on the free tier.',
     warning:
-      'Finnhub keeps historical stock candles (/stock/candle) behind a PAID plan — free keys get HTTP 403, ' +
-      'which blocks equity backtesting. Crypto candles are free (try BINANCE:BTCUSDT). If you hit the 403, ' +
-      'switch to Alpha Vantage here.',
+      'Finnhub keeps historical candles behind a PAID plan — free keys get HTTP 403 on /stock/candle AND ' +
+      '/crypto/candle (verified 2026-08-15; crypto used to be free and no longer is). That blocks backtesting ' +
+      'outright on a free key. Use Yahoo Finance instead — no key required.',
   },
   alphavantage: {
     id: 'alphavantage',
@@ -39,7 +56,8 @@ const PROVIDERS = {
   },
 };
 
-const DEFAULT = 'finnhub';
+// Yahoo is the default because it is the only one that works without a key or a quota.
+const DEFAULT = 'yahoo';
 
 function get(id) {
   const p = PROVIDERS[id || DEFAULT];
