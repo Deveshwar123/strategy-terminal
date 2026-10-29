@@ -1,0 +1,19 @@
+{
+  "name": "Level Retest",
+  "language": "python",
+  "code": "# Buy when price comes back to a level it has turned at before.\n#\n# A \"level\" is a swing point (a bar whose high/low stands above/below its neighbours),\n# and levels within `tol` of each other are treated as the same level. `touches` counts\n# how many times price turned there, so min_touches=2 means \"only levels the market has\n# respected more than once\".\n#\n# A pivot needs `right` later bars to confirm it, so a level becomes visible a few bars\n# after it forms. That delay is real -- at the moment of the turn nobody knows it was one.\n\ndef on_bar(bar, ctx):\n    tol = ctx.param('tol', 0.004)\n    stop = ctx.param('stop', 0.03)\n    take = ctx.param('take', 0.06)\n\n    # ---- manage an open position first\n    if ctx.is_long:\n        entry = ctx.avg_price\n        if bar['l'] <= entry * (1 - stop):\n            ctx.close('stop %.1f%%' % (stop * 100))\n        elif bar['h'] >= entry * (1 + take):\n            ctx.close('target %.1f%%' % (take * 100))\n        return\n\n    # ---- look for a retest of established support\n    lv = ctx.retest(tol, ctx.param('left', 2), ctx.param('right', 2),\n                    ctx.param('lookback', 250), ctx.param('min_touches', 2))\n    if lv is None:\n        return\n\n    ctx.plot('level', lv['price'])\n\n    if lv['kind'] == 'low':\n        ctx.log('retest support %.2f (%d touches, last %d bars ago)'\n                % (lv['price'], lv['touches'], lv['bars_ago']))\n        ctx.buy(reason='retest support %.2f' % lv['price'])\n",
+  "params": "{\"tol\": 0.004, \"left\": 2, \"right\": 2, \"lookback\": 250, \"min_touches\": 2, \"stop\": 0.03, \"take\": 0.06}",
+  "symbol": "SPY",
+  "timeframe": "1Day",
+  "range": "5y",
+  "start": "",
+  "end": "",
+  "config": {
+    "initialCash": 100000,
+    "defaultQty": 100,
+    "fillMode": "next_open",
+    "slippageBps": 0,
+    "commission": 0
+  },
+  "savedAt": "2026-08-16T00:00:00.000Z"
+}

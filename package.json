@@ -1,7 +1,7 @@
 {
   "name": "strategy-terminal",
   "version": "1.0.0",
-  "description": "Local multi-language trading strategy backtester on Alpaca data",
+  "description": "Local multi-language (Python/JavaScript/Ruby) trading strategy backtester on Yahoo Finance data",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

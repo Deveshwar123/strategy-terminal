@@ -7,6 +7,11 @@ JavaScript, or Ruby**, pick the language from a dropdown, and run it over histor
 Zero npm dependencies, and **no API key to get**: data comes from Yahoo Finance, which is
 public. Nothing leaves your machine except those price requests.
 
+![Strategy Terminal: a moving-average crossover backtested on two years of AAPL daily bars, with stats, price chart with trades, and equity curve](docs/screenshot.png)
+
+**Stack:** Node.js with zero npm dependencies · a vanilla HTML/CSS/JavaScript front end · strategy
+runners in Python, JavaScript and Ruby, each in its own subprocess · Yahoo Finance data, cached on disk
+
 ```bash
 node server.js          # → http://localhost:4477
 node selftest.js        # runs the same strategy through every runtime and checks they agree

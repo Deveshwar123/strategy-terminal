@@ -3,6 +3,8 @@
 
 # saved strategies are personal
 strategies/*.json
+# ...except the worked example the README points to
+!strategies/Level Retest.json
 
 node_modules/
 .DS_Store
